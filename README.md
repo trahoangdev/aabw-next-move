@@ -27,6 +27,7 @@ The MVP lets you simulate different builder situations:
 - Review the next action, follow-up action, and pre-demo checklist.
 - See semantic retrieval context used by the AI explanation.
 - View current and recommended venues on an OpenStreetMap map.
+- Save action plans to the current event session and review them later.
 - Discover matching resources, perks, mentors, and deadlines.
 - Mark actions and deadlines complete.
 - Copy a plain-text action plan for Discord, WhatsApp, or team notes.
@@ -47,6 +48,7 @@ Example recommendation:
 - Supabase pgvector retrieval over event documents with keyword fallback.
 - Leaflet + OpenStreetMap venue map.
 - Copyable action plan.
+- Saved action plan history backed by Supabase.
 - Supabase-backed checklist sync and run readiness score.
 - Daily runbook ranked by context, timing, venue, and urgency.
 - Venue context and travel notes.
@@ -54,7 +56,7 @@ Example recommendation:
 - Mentor matching.
 - Deadline queue.
 - Clean dashboard UI built on shadcn/ui components.
-- Fully self-contained mock data. No internal AABW systems are required.
+- Fully self-contained public AABW data snapshot with mock fallback. No internal AABW systems are required.
 
 ## Tech Stack
 
@@ -86,6 +88,7 @@ src/
         seed/route.ts                  # Generates OpenAI embeddings for event_documents
       event-data/route.ts              # Supabase event data loader with mock fallback
       profiles/route.ts                # Supabase builder profile upsert
+      recommendations/route.ts         # Saved action plan history
       retrieval/route.ts               # pgvector retrieval with keyword fallback
     (external)/
       page.tsx                         # Redirects / to /dashboard/next-move
@@ -118,11 +121,11 @@ vercel.json                            # Vercel build config
 
 Only the AABW Next Move product route is kept. Template demo pages were removed, while the reusable UI component library remains available under `src/components/ui`.
 
-## Mock Data
+## Event Data
 
-The app can read from Supabase or fallback to local mock data.
+The app can read from Supabase or fallback to local public data.
 
-Local mock data lives in:
+Local fallback data lives in:
 
 ```txt
 src/app/(main)/dashboard/next-move/_components/data.ts
@@ -131,14 +134,14 @@ src/app/(main)/dashboard/next-move/_components/data.ts
 It includes:
 
 - Event days: Enable, Integrate, Design, Build, Demo.
-- Venues and travel notes.
+- Publicly listed AABW venues and travel notes.
 - Workshops, mentor sessions, community events, hackathon blocks, and demo events.
 - Builder profiles.
 - Resources and perks.
 - Mentors.
 - Deadlines.
 
-This keeps the project self-contained for judging and demo purposes.
+This keeps the project self-contained for judging and demo purposes. The schedule, tracks, perks, Builder Experience guidance, and Devpost deadlines are based on the public AABW landing page, Builder Experience track page, and Devpost challenge page as of the current build.
 
 For Supabase-backed mode:
 
@@ -251,6 +254,7 @@ Tables included in `supabase/schema.sql`:
 - `deadlines`
 - `builder_profiles`
 - `builder_checklist_items`
+- `saved_recommendations`
 - `event_documents`
 
 The schema also includes:
@@ -259,7 +263,7 @@ The schema also includes:
 - `match_event_documents` RPC for cosine similarity search.
 - Seed data for venues, schedule blocks, resources, mentors, deadlines, profiles, and event documents.
 
-After running `supabase/schema.sql`, seed embeddings:
+After running `supabase/schema.sql`, seed embeddings or reseed them whenever event data changes:
 
 ```bash
 curl -X POST http://localhost:3000/api/embeddings/seed

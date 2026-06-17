@@ -20,6 +20,7 @@ import {
   Route,
   Save,
   Sparkles,
+  Trash2,
   UserPlus,
   Users,
 } from "lucide-react";
@@ -103,6 +104,22 @@ type RetrievalPayload = {
   source: "pgvector" | "keyword";
   reason?: string;
   matches: RetrievalMatch[];
+};
+
+type SavedRecommendation = {
+  id: string;
+  sessionId: string;
+  profileId: string;
+  profileName: string;
+  day: string;
+  selectedTime: string;
+  title: string;
+  venue: string;
+  planText: string;
+  aiSource: "openai" | "deterministic";
+  retrievalSource: "pgvector" | "keyword";
+  matchScore: number;
+  createdAt: string;
 };
 
 function toMinutes(time: string) {
@@ -324,9 +341,11 @@ export function NextMoveDashboard() {
   const [selectedDay, setSelectedDay] = useState<EventDay>(2);
   const [selectedTime, setSelectedTime] = useState("10:30");
   const [completedItems, setCompletedItems] = useState<string[]>([]);
+  const [savedRecommendations, setSavedRecommendations] = useState<SavedRecommendation[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [hasLoadedRemoteChecklist, setHasLoadedRemoteChecklist] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
+  const [focusedEventId, setFocusedEventId] = useState<string | null>(null);
 
   const allProfiles = useMemo(
     () => uniqueProfiles([...eventData.profiles, ...customProfiles]),
@@ -340,6 +359,10 @@ export function NextMoveDashboard() {
   const rec = useMemo(
     () => recommendation(eventData.schedule, profile, selectedDay, selectedTime),
     [eventData.schedule, profile, selectedDay, selectedTime],
+  );
+  const focusedBlock = useMemo(
+    () => eventData.schedule.find((block) => block.id === focusedEventId && block.day === selectedDay) ?? rec.best,
+    [eventData.schedule, focusedEventId, rec.best, selectedDay],
   );
   const resourceMatches = useMemo(
     () => relevantResources(eventData.resources, profile),
@@ -379,6 +402,20 @@ export function NextMoveDashboard() {
         rec.best.title,
       ].join(" "),
     [dayMeta.label, dayMeta.theme, profile, rec.best.title, selectedTime],
+  );
+  const currentPlanText = useMemo(
+    () =>
+      actionPlanText({
+        profile,
+        dayMeta,
+        selectedTime,
+        best: rec.best,
+        next: rec.next,
+        explanation: aiInsight?.explanation ?? rec.explanation,
+        deadlineTitle: deadlineQueue[0]?.title,
+        venueList: eventData.venues,
+      }),
+    [aiInsight?.explanation, dayMeta, deadlineQueue, eventData.venues, profile, rec, selectedTime],
   );
 
   useEffect(() => {
@@ -512,6 +549,10 @@ export function NextMoveDashboard() {
   }, [profile]);
 
   useEffect(() => {
+    setFocusedEventId(rec.best.id);
+  }, [rec.best.id]);
+
+  useEffect(() => {
     if (!isHydrated) return;
     window.localStorage.setItem(customProfilesKey, JSON.stringify(customProfiles));
   }, [customProfiles, isHydrated]);
@@ -537,6 +578,28 @@ export function NextMoveDashboard() {
       .catch(() => {
         if (!isActive) return;
         setHasLoadedRemoteChecklist(true);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [isHydrated, sessionId]);
+
+  useEffect(() => {
+    if (!isHydrated || !sessionId) return;
+    let isActive = true;
+
+    fetch(`/api/recommendations?sessionId=${encodeURIComponent(sessionId)}`)
+      .then((response) => response.json() as Promise<{ persisted: boolean; recommendations: SavedRecommendation[] }>)
+      .then((payload) => {
+        if (!isActive) return;
+        if (payload.persisted) {
+          setSavedRecommendations(payload.recommendations);
+        }
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setSavedRecommendations([]);
       });
 
     return () => {
@@ -607,6 +670,7 @@ export function NextMoveDashboard() {
     const nextSessionId = createSessionId();
     setCustomProfiles([]);
     setCompletedItems([]);
+    setSavedRecommendations([]);
     setProfileId(seedProfiles[0].id);
     setSelectedDay(2);
     setSelectedTime("10:30");
@@ -620,22 +684,70 @@ export function NextMoveDashboard() {
   };
 
   const copyPlan = async () => {
-    const text = actionPlanText({
-      profile,
-      dayMeta,
-      selectedTime,
-      best: rec.best,
-      next: rec.next,
-      explanation: aiInsight?.explanation ?? rec.explanation,
-      deadlineTitle: deadlineQueue[0]?.title,
-      venueList: eventData.venues,
-    });
-
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(currentPlanText);
       toast.success("Action plan copied");
     } catch {
       toast.error("Could not copy action plan");
+    }
+  };
+
+  const savePlan = async () => {
+    if (!sessionId) {
+      toast.error("Session is not ready yet");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/recommendations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          profileId: profile.id,
+          profileName: profile.name,
+          day: `${dayMeta.label} - ${dayMeta.theme}`,
+          selectedTime,
+          title: rec.best.title,
+          venue: venueName(rec.best.venueId, eventData.venues),
+          planText: currentPlanText,
+          aiSource: aiInsight?.source ?? "deterministic",
+          retrievalSource,
+          matchScore: rec.score,
+        }),
+      });
+      const payload = (await response.json()) as {
+        persisted: boolean;
+        recommendation?: SavedRecommendation;
+        reason?: string;
+      };
+
+      if (payload.persisted && payload.recommendation) {
+        setSavedRecommendations((current) => [payload.recommendation as SavedRecommendation, ...current].slice(0, 8));
+        toast.success("Action plan saved");
+      } else {
+        toast.error(payload.reason ?? "Could not save action plan");
+      }
+    } catch {
+      toast.error("Could not save action plan");
+    }
+  };
+
+  const deleteSavedPlan = async (id: string) => {
+    setSavedRecommendations((current) => current.filter((item) => item.id !== id));
+
+    try {
+      const response = await fetch("/api/recommendations", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, sessionId }),
+      });
+      const payload = (await response.json()) as { persisted: boolean; reason?: string };
+      if (!payload.persisted) {
+        toast.error(payload.reason ?? "Could not delete saved plan");
+      }
+    } catch {
+      toast.error("Could not delete saved plan");
     }
   };
 
@@ -780,6 +892,10 @@ export function NextMoveDashboard() {
             </CardDescription>
             <CardAction className="flex items-center gap-2">
               <Badge>{rec.best.type}</Badge>
+              <Button size="sm" variant="outline" type="button" onClick={savePlan}>
+                <Save className="size-3.5" />
+                Save plan
+              </Button>
               <Button size="sm" variant="outline" type="button" onClick={copyPlan}>
                 <ClipboardCopy className="size-3.5" />
                 Copy plan
@@ -864,21 +980,30 @@ export function NextMoveDashboard() {
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr_1fr]">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <MapPin className="size-4 text-primary" />
               Venue map
             </CardTitle>
-            <CardDescription>OpenStreetMap venue context for the current and recommended move.</CardDescription>
+            <CardDescription>
+              Focused on {focusedBlock.title} at {venueName(focusedBlock.venueId, eventData.venues)}.
+            </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
             <VenueMap
               venues={eventData.venues}
               currentVenueId={profile.currentVenue}
               recommendedVenueId={rec.best.venueId}
+              focusedVenueId={focusedBlock.venueId}
+              focusedEventTitle={focusedBlock.title}
             />
+            <div className="flex flex-wrap gap-2 text-xs">
+              <Badge variant="default">Focused event</Badge>
+              <Badge variant="outline">Recommended move</Badge>
+              <Badge variant="secondary">Current venue</Badge>
+            </div>
           </CardContent>
         </Card>
 
@@ -911,6 +1036,8 @@ export function NextMoveDashboard() {
             ))}
           </CardContent>
         </Card>
+
+        <SavedPlans recommendations={savedRecommendations} onDelete={deleteSavedPlan} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr_1fr]">
@@ -926,8 +1053,10 @@ export function NextMoveDashboard() {
                 block={block}
                 score={score}
                 rank={index + 1}
+                focused={block.id === focusedBlock.id}
                 selected={block.id === rec.best.id}
                 venues={eventData.venues}
+                onFocus={() => setFocusedEventId(block.id)}
               />
             ))}
           </CardContent>
@@ -1052,6 +1181,62 @@ function SignalList({ title, values }: { title: string; values: string[] }) {
   );
 }
 
+function SavedPlans({
+  recommendations,
+  onDelete,
+}: {
+  recommendations: SavedRecommendation[];
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Saved plans</CardTitle>
+        <CardDescription>Session history for action plans saved during the event.</CardDescription>
+        <CardAction>
+          <Badge variant="outline">{recommendations.length} saved</Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {recommendations.length === 0 ? (
+          <div className="rounded-lg border border-dashed bg-muted/30 p-4 text-muted-foreground text-sm">
+            Save a plan to keep the current recommendation for later review.
+          </div>
+        ) : (
+          recommendations.map((item) => (
+            <div key={item.id} className="rounded-lg border bg-background/60 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{item.title}</div>
+                  <div className="mt-1 text-muted-foreground text-xs">
+                    {item.day} at {item.selectedTime} - {item.venue}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="size-7 shrink-0"
+                  aria-label={`Delete saved plan ${item.title}`}
+                  onClick={() => onDelete(item.id)}
+                >
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </div>
+              <p className="mt-2 line-clamp-2 text-muted-foreground text-sm">{item.planText}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Badge variant="secondary">{item.matchScore}%</Badge>
+                <Badge variant="outline">{item.aiSource}</Badge>
+                <Badge variant="outline">{item.retrievalSource}</Badge>
+              </div>
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function MetricCard({
   icon: Icon,
   label,
@@ -1085,10 +1270,14 @@ function VenueMap({
   venues,
   currentVenueId,
   recommendedVenueId,
+  focusedVenueId,
+  focusedEventTitle,
 }: {
   venues: Venue[];
   currentVenueId: string;
   recommendedVenueId: string;
+  focusedVenueId: string;
+  focusedEventTitle: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -1102,6 +1291,7 @@ function VenueMap({
       if (!isActive || !containerRef.current) return;
 
       const center =
+        venues.find((venue) => venue.id === focusedVenueId) ??
         venues.find((venue) => venue.id === recommendedVenueId) ??
         venues.find((venue) => venue.id === currentVenueId) ??
         venues[0];
@@ -1116,22 +1306,34 @@ function VenueMap({
         maxZoom: 19,
       }).addTo(map);
 
+      let focusedMarker: import("leaflet").Marker | undefined;
+
       for (const venue of venues) {
         const isCurrent = venue.id === currentVenueId;
         const isRecommended = venue.id === recommendedVenueId;
-        const color = isRecommended
+        const isFocused = venue.id === focusedVenueId;
+        const color = isFocused
           ? "hsl(var(--primary))"
-          : isCurrent
-            ? "hsl(var(--chart-2))"
-            : "hsl(var(--muted-foreground))";
-        const label = isRecommended ? "Recommended" : isCurrent ? "Current" : "Venue";
+          : isRecommended
+            ? "hsl(var(--chart-1))"
+            : isCurrent
+              ? "hsl(var(--chart-2))"
+              : "hsl(var(--muted-foreground))";
+        const markerSize = isFocused ? 24 : 18;
+        const label = isFocused
+          ? `Focused event: ${focusedEventTitle}`
+          : isRecommended
+            ? "Recommended move"
+            : isCurrent
+              ? "Current venue"
+              : "Venue";
 
-        L.marker([venue.lat, venue.lng], {
+        const marker = L.marker([venue.lat, venue.lng], {
           icon: L.divIcon({
             className: "",
-            html: `<span style="display:block;width:18px;height:18px;border-radius:999px;background:${color};border:3px solid hsl(var(--background));box-shadow:0 6px 18px rgba(0,0,0,.24)"></span>`,
-            iconAnchor: [9, 9],
-            iconSize: [18, 18],
+            html: `<span style="display:block;width:${markerSize}px;height:${markerSize}px;border-radius:999px;background:${color};border:3px solid hsl(var(--background));box-shadow:0 6px 18px rgba(0,0,0,.24)"></span>`,
+            iconAnchor: [markerSize / 2, markerSize / 2],
+            iconSize: [markerSize, markerSize],
           }),
         })
           .addTo(map)
@@ -1140,16 +1342,23 @@ function VenueMap({
               venue.travelNote,
             )}`,
           );
+
+        if (isFocused) {
+          focusedMarker = marker;
+        }
       }
 
-      window.setTimeout(() => map?.invalidateSize(), 0);
+      window.setTimeout(() => {
+        map?.invalidateSize();
+        focusedMarker?.openPopup();
+      }, 0);
     });
 
     return () => {
       isActive = false;
       map?.remove();
     };
-  }, [currentVenueId, recommendedVenueId, venues]);
+  }, [currentVenueId, focusedEventTitle, focusedVenueId, recommendedVenueId, venues]);
 
   return <div ref={containerRef} className="h-72 overflow-hidden rounded-lg border bg-muted" />;
 }
@@ -1196,22 +1405,30 @@ function ActionStep({
 
 function ScheduleRow({
   block,
+  focused,
   selected,
   rank,
   score,
   venues,
+  onFocus,
 }: {
   block: EventBlock;
+  focused: boolean;
   selected: boolean;
   rank: number;
   score: number;
   venues: typeof mockVenues;
+  onFocus: () => void;
 }) {
   return (
-    <div
+    <button
+      type="button"
+      aria-pressed={focused}
+      onClick={onFocus}
       className={cn(
-        "rounded-lg border bg-background/60 p-3 transition-colors",
+        "w-full rounded-lg border bg-background/60 p-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         selected && "border-primary/40 bg-primary/5",
+        focused && "ring-2 ring-primary/30",
       )}
     >
       <div className="flex items-start justify-between gap-3">
@@ -1223,11 +1440,12 @@ function ScheduleRow({
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
           <Badge variant={selected ? "default" : "outline"}>{selected ? "next" : block.type}</Badge>
+          {focused && <Badge variant="secondary">map</Badge>}
           <span className="text-muted-foreground text-xs">{score}%</span>
         </div>
       </div>
       <p className="mt-2 text-muted-foreground text-sm">{block.outcome}</p>
-    </div>
+    </button>
   );
 }
 
