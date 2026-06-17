@@ -1,11 +1,17 @@
 create extension if not exists pgcrypto;
+create extension if not exists vector;
 
 create table if not exists public.venues (
   id text primary key,
   name text not null,
   area text not null,
-  travel_note text not null
+  travel_note text not null,
+  lat double precision not null default 0,
+  lng double precision not null default 0
 );
+
+alter table public.venues add column if not exists lat double precision not null default 0;
+alter table public.venues add column if not exists lng double precision not null default 0;
 
 create table if not exists public.event_blocks (
   id text primary key,
@@ -71,6 +77,18 @@ create table if not exists public.builder_checklist_items (
   unique (session_id, item_id)
 );
 
+create table if not exists public.event_documents (
+  id text primary key,
+  source_type text not null check (source_type in ('event', 'resource', 'mentor', 'deadline', 'venue')),
+  source_id text not null,
+  title text not null,
+  body text not null,
+  tags text[] not null default '{}',
+  embedding vector(1536)
+);
+
+alter table public.event_documents add column if not exists embedding vector(1536);
+
 alter table public.venues enable row level security;
 alter table public.event_blocks enable row level security;
 alter table public.resources enable row level security;
@@ -78,6 +96,22 @@ alter table public.mentors enable row level security;
 alter table public.deadlines enable row level security;
 alter table public.builder_profiles enable row level security;
 alter table public.builder_checklist_items enable row level security;
+alter table public.event_documents enable row level security;
+
+drop policy if exists "public read venues" on public.venues;
+drop policy if exists "public read event blocks" on public.event_blocks;
+drop policy if exists "public read resources" on public.resources;
+drop policy if exists "public read mentors" on public.mentors;
+drop policy if exists "public read deadlines" on public.deadlines;
+drop policy if exists "public read builder profiles" on public.builder_profiles;
+drop policy if exists "public insert builder profiles" on public.builder_profiles;
+drop policy if exists "public update builder profiles" on public.builder_profiles;
+drop policy if exists "public read checklist" on public.builder_checklist_items;
+drop policy if exists "public insert checklist" on public.builder_checklist_items;
+drop policy if exists "public update checklist" on public.builder_checklist_items;
+drop policy if exists "public read event documents" on public.event_documents;
+drop policy if exists "public insert event documents" on public.event_documents;
+drop policy if exists "public update event documents" on public.event_documents;
 
 create policy "public read venues" on public.venues for select using (true);
 create policy "public read event blocks" on public.event_blocks for select using (true);
@@ -92,16 +126,56 @@ create policy "public update builder profiles" on public.builder_profiles for up
 create policy "public read checklist" on public.builder_checklist_items for select using (true);
 create policy "public insert checklist" on public.builder_checklist_items for insert with check (true);
 create policy "public update checklist" on public.builder_checklist_items for update using (true) with check (true);
+create policy "public read event documents" on public.event_documents for select using (true);
+create policy "public insert event documents" on public.event_documents for insert with check (true);
+create policy "public update event documents" on public.event_documents for update using (true) with check (true);
 
-insert into public.venues (id, name, area, travel_note) values
-  ('main', 'AABW Main Venue', 'District 1', 'Central hackathon floor. Keep 10 minutes for badge and lift queues.'),
-  ('cloud-hub', 'Cloud Partner Hub', 'District 1', '12 minutes from main venue by ride hailing in normal traffic.'),
-  ('model-lab', 'Model Lab', 'Thu Thiem', 'Plan 25 minutes from District 1; bridge traffic spikes after 17:00.'),
-  ('community', 'Community Night Space', 'District 3', 'Best for team matching, mentor intros, and informal project feedback.')
+create index if not exists event_documents_embedding_idx
+  on public.event_documents
+  using ivfflat (embedding vector_cosine_ops)
+  with (lists = 10);
+
+create or replace function public.match_event_documents(
+  query_embedding vector(1536),
+  match_count int default 6
+)
+returns table (
+  id text,
+  source_type text,
+  source_id text,
+  title text,
+  body text,
+  tags text[],
+  similarity float
+)
+language sql
+stable
+as $$
+  select
+    event_documents.id,
+    event_documents.source_type,
+    event_documents.source_id,
+    event_documents.title,
+    event_documents.body,
+    event_documents.tags,
+    1 - (event_documents.embedding <=> query_embedding) as similarity
+  from public.event_documents
+  where event_documents.embedding is not null
+  order by event_documents.embedding <=> query_embedding
+  limit match_count;
+$$;
+
+insert into public.venues (id, name, area, travel_note, lat, lng) values
+  ('main', 'AABW Main Venue', 'District 1', 'Central hackathon floor. Keep 10 minutes for badge and lift queues.', 10.7769, 106.7009),
+  ('cloud-hub', 'Cloud Partner Hub', 'District 1', '12 minutes from main venue by ride hailing in normal traffic.', 10.7816, 106.7055),
+  ('model-lab', 'Model Lab', 'Thu Thiem', 'Plan 25 minutes from District 1; bridge traffic spikes after 17:00.', 10.7762, 106.7205),
+  ('community', 'Community Night Space', 'District 3', 'Best for team matching, mentor intros, and informal project feedback.', 10.7844, 106.6844)
 on conflict (id) do update set
   name = excluded.name,
   area = excluded.area,
-  travel_note = excluded.travel_note;
+  travel_note = excluded.travel_note,
+  lat = excluded.lat,
+  lng = excluded.lng;
 
 insert into public.event_blocks (id, day, time, end_time, title, host, venue_id, type, tags, outcome, capacity) values
   ('kickoff', 1, '09:00', '10:15', 'Registration, welcome, and buildathon kickoff', 'AABW', 'main', 'workshop', array['onboarding', 'rules', 'submission'], 'Leave with the event map, Discord channels, and judging expectations.', 'open'),
@@ -160,3 +234,73 @@ on conflict (id) do update set
   title = excluded.title,
   detail = excluded.detail,
   severity = excluded.severity;
+
+insert into public.event_documents (id, source_type, source_id, title, body, tags)
+select
+  'event:' || id,
+  'event',
+  id,
+  title,
+  concat_ws(' ', title, host, type, outcome, array_to_string(tags, ' ')),
+  tags
+from public.event_blocks
+on conflict (id) do update set
+  title = excluded.title,
+  body = excluded.body,
+  tags = excluded.tags;
+
+insert into public.event_documents (id, source_type, source_id, title, body, tags)
+select
+  'resource:' || id,
+  'resource',
+  id,
+  title,
+  concat_ws(' ', title, partner, type, action, array_to_string(tags, ' ')),
+  tags
+from public.resources
+on conflict (id) do update set
+  title = excluded.title,
+  body = excluded.body,
+  tags = excluded.tags;
+
+insert into public.event_documents (id, source_type, source_id, title, body, tags)
+select
+  'mentor:' || id,
+  'mentor',
+  id,
+  name,
+  concat_ws(' ', name, focus, slot, array_to_string(tags, ' ')),
+  tags
+from public.mentors
+on conflict (id) do update set
+  title = excluded.title,
+  body = excluded.body,
+  tags = excluded.tags;
+
+insert into public.event_documents (id, source_type, source_id, title, body, tags)
+select
+  'deadline:' || id,
+  'deadline',
+  id,
+  title,
+  concat_ws(' ', title, detail, severity),
+  array[]::text[]
+from public.deadlines
+on conflict (id) do update set
+  title = excluded.title,
+  body = excluded.body,
+  tags = excluded.tags;
+
+insert into public.event_documents (id, source_type, source_id, title, body, tags)
+select
+  'venue:' || id,
+  'venue',
+  id,
+  name,
+  concat_ws(' ', name, area, travel_note),
+  array['venue', area]
+from public.venues
+on conflict (id) do update set
+  title = excluded.title,
+  body = excluded.body,
+  tags = excluded.tags;

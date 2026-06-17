@@ -23,12 +23,18 @@ function dayValue(row: UnknownRecord, key: string): EventDay {
   return value >= 1 && value <= 5 ? (value as EventDay) : 1;
 }
 
+function numberValue(row: UnknownRecord, key: string) {
+  return typeof row[key] === "number" ? row[key] : 0;
+}
+
 export function mapVenue(row: UnknownRecord): Venue {
   return {
     id: stringValue(row, "id"),
     name: stringValue(row, "name"),
     area: stringValue(row, "area"),
     travelNote: stringValue(row, "travel_note"),
+    lat: numberValue(row, "lat"),
+    lng: numberValue(row, "lng"),
   };
 }
 

@@ -25,6 +25,8 @@ The MVP lets you simulate different builder situations:
 - Get a ranked "Next Move" recommendation.
 - See why the recommendation was made.
 - Review the next action, follow-up action, and pre-demo checklist.
+- See semantic retrieval context used by the AI explanation.
+- View current and recommended venues on an OpenStreetMap map.
 - Discover matching resources, perks, mentors, and deadlines.
 - Mark actions and deadlines complete.
 - Copy a plain-text action plan for Discord, WhatsApp, or team notes.
@@ -41,8 +43,11 @@ Example recommendation:
 - Recommendation engine for workshops, mentor sessions, hackathon blocks, and demo milestones.
 - Match confidence score with explanation.
 - "Now / Next / Before demo" action plan.
+- OpenAI-powered explanation route with deterministic fallback.
+- Supabase pgvector retrieval over event documents with keyword fallback.
+- Leaflet + OpenStreetMap venue map.
 - Copyable action plan.
-- Persisted checklist and run readiness score.
+- Supabase-backed checklist sync and run readiness score.
 - Daily runbook ranked by context, timing, venue, and urgency.
 - Venue context and travel notes.
 - Resource and perk matching.
@@ -61,6 +66,10 @@ Example recommendation:
 - Lucide icons
 - Supabase JS + Supabase SSR
 - OpenAI Node SDK with Responses API route
+- Supabase Postgres + pgvector RPC
+- Leaflet + OpenStreetMap
+- Playwright smoke test
+- Vercel deployment config
 - Zustand for preferences inherited from the template shell
 - Biome for formatting and linting
 
@@ -72,8 +81,12 @@ src/
     api/
       ai/
         next-move/route.ts             # OpenAI Responses API with deterministic fallback
+      checklist/route.ts               # Supabase checklist session persistence
+      embeddings/
+        seed/route.ts                  # Generates OpenAI embeddings for event_documents
       event-data/route.ts              # Supabase event data loader with mock fallback
       profiles/route.ts                # Supabase builder profile upsert
+      retrieval/route.ts               # pgvector retrieval with keyword fallback
     (external)/
       page.tsx                         # Redirects / to /dashboard/next-move
     (main)/
@@ -97,7 +110,10 @@ src/
     sidebar/
       sidebar-items.ts                 # Single product nav entry
 supabase/
-  schema.sql                           # Tables, RLS policies, and seed data
+  schema.sql                           # Tables, pgvector RPC, RLS policies, and seed data
+tests/
+  smoke.spec.ts                        # Playwright dashboard smoke test
+vercel.json                            # Vercel build config
 ```
 
 Only the AABW Next Move product route is kept. Template demo pages were removed, while the reusable UI component library remains available under `src/components/ui`.
@@ -154,17 +170,23 @@ If tables are not created yet, it returns:
 
 The fallback is intentional so the demo keeps working before database setup.
 
-The current browser session state is stored in `localStorage`:
+The current browser session state is stored in `localStorage` and synced to Supabase where available:
 
 - Custom builder profiles.
 - Selected profile, event day, and time.
 - Completed actions and deadlines.
 
-This makes the prototype feel closer to an actual event tool without requiring a backend.
+This keeps the prototype resilient offline while still using Supabase for real persistence.
 
-## Recommendation Logic
+## AI and Recommendation Logic
 
-The current MVP uses deterministic scoring instead of a live LLM call.
+The recommendation path is hybrid:
+
+1. Deterministic scoring ranks schedule blocks by profile fit, timing, venue, and urgency.
+2. `/api/retrieval` builds a query from the builder profile and selected event context.
+3. When `event_documents` has embeddings, Supabase pgvector returns semantic matches.
+4. `/api/ai/next-move` sends the recommendation plus retrieval context to OpenAI.
+5. If OpenAI, pgvector, or Supabase is unavailable, the dashboard falls back to deterministic and keyword logic.
 
 Each event block is scored using:
 
@@ -175,15 +197,7 @@ Each event block is scored using:
 - Venue match.
 - Capacity urgency.
 
-The explanation text is generated from the matched signals. This keeps the demo reliable and fast without requiring API keys.
-
-Future AI upgrade path:
-
-1. Store schedules, mentors, perks, and resources in Supabase.
-2. Add embeddings with pgvector.
-3. Retrieve relevant event data for the current builder context.
-4. Use an LLM to produce concise explanations and action plans.
-5. Keep deterministic rules for safety-critical constraints such as time, venue, and deadlines.
+Deterministic rules remain the guardrail for safety-critical constraints such as time, venue, and deadlines.
 
 ## OpenAI Setup
 
@@ -200,6 +214,7 @@ Add your key to `.env.local`:
 ```bash
 OPENAI_API_KEY=your_api_key_here
 OPENAI_MODEL=gpt-4.1-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
 The API route is intentionally server-side only. The browser never receives the OpenAI API key.
@@ -236,8 +251,35 @@ Tables included in `supabase/schema.sql`:
 - `deadlines`
 - `builder_profiles`
 - `builder_checklist_items`
+- `event_documents`
 
-The current RLS policies are public-readable for event data and public insert/update for builder profiles/checklist items, which fits an unauthenticated event MVP. Tighten these policies when adding real auth.
+The schema also includes:
+
+- `vector` extension.
+- `match_event_documents` RPC for cosine similarity search.
+- Seed data for venues, schedule blocks, resources, mentors, deadlines, profiles, and event documents.
+
+After running `supabase/schema.sql`, seed embeddings:
+
+```bash
+curl -X POST http://localhost:3000/api/embeddings/seed
+```
+
+Then test retrieval:
+
+```bash
+curl -X POST http://localhost:3000/api/retrieval \
+  -H "Content-Type: application/json" \
+  -d "{\"query\":\"nextjs supabase deployment Day 2\", \"matchCount\":3}"
+```
+
+Expected source after embedding seed:
+
+```json
+{ "source": "pgvector" }
+```
+
+The current RLS policies are public-readable for event data and public insert/update for builder profiles, checklist items, and event document embeddings. This fits an unauthenticated event MVP. Tighten these policies or use a service role route when adding real auth.
 
 ## Getting Started
 
@@ -270,6 +312,7 @@ npm run start     # Start production server after build
 npm run check     # Run Biome checks
 npm run check:fix # Run Biome checks and apply safe fixes
 npm run format    # Format files
+npm run test:e2e  # Run Playwright smoke test
 ```
 
 ## Verification
@@ -279,13 +322,20 @@ The current implementation has been verified with:
 ```bash
 npm run check
 npm run build
+npm run test:e2e
 ```
 
-The production build route table should only include:
+The production build route table should include:
 
 ```txt
 /
 /_not-found
+/api/ai/next-move
+/api/checklist
+/api/embeddings/seed
+/api/event-data
+/api/profiles
+/api/retrieval
 /dashboard
 /dashboard/next-move
 ```
@@ -298,26 +348,25 @@ AABW Next Move directly targets the Builder Experience Award brief:
 - It helps builders act faster during the week.
 - It reduces confusion around schedule, venue, resources, mentors, and deadlines.
 - It is a working prototype, not a static concept.
-- It uses AI-style recommendation and explanation logic meaningfully.
+- It uses AI, retrieval, maps, persistence, and deterministic guardrails meaningfully.
 - It is self-contained and easy to run with mock data.
 - It has a clear path to live deployment during AABW.
 
 ## What Is Not Included Yet
 
 - Real authentication.
-- Supabase schema must be run before database persistence is active.
+- Supabase schema must be run before pgvector retrieval is active.
 - Live official AABW API integration.
 - OpenAI calls require `OPENAI_API_KEY`.
 - Push notifications.
-- Real map routing.
+- Turn-by-turn map routing.
 
 These are intentionally left out of the MVP to keep the prototype focused, reliable, and easy to judge.
 
 ## Suggested Next Steps
 
 - Add a real onboarding form for builder/team profile creation.
-- Persist selected profile and saved recommendations.
-- Add Supabase tables for schedules, venues, resources, mentors, and deadlines.
-- Add pgvector matching for resources and sessions.
+- Add Supabase Auth and per-team session ownership.
+- Persist saved recommendations and copied plans.
 - Add calendar export or reminder actions.
 - Add a mobile-first event mode for use on-site.

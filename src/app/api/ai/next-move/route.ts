@@ -31,6 +31,16 @@ const requestSchema = z.object({
     })
     .optional(),
   deadlineTitle: z.string().optional(),
+  retrievalContext: z
+    .array(
+      z.object({
+        title: z.string(),
+        body: z.string(),
+        sourceType: z.string(),
+        similarity: z.number(),
+      }),
+    )
+    .default([]),
   deterministicExplanation: z.string(),
 });
 
@@ -54,7 +64,7 @@ export async function POST(request: Request) {
         {
           role: "system",
           content:
-            "You are AABW Next Move, a concise live-event copilot. Return only JSON with explanation, now, next, beforeDemo, risk.",
+            "You are AABW Next Move, a concise live-event copilot. Use retrieved event context when it is present, but keep time, venue, and deadline constraints concrete. Return only JSON with explanation, now, next, beforeDemo, risk.",
         },
         {
           role: "user",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ArrowRight,
@@ -47,12 +47,14 @@ import {
   schedule as mockSchedule,
   venues as mockVenues,
   profiles as seedProfiles,
+  type Venue,
 } from "./data";
 
 const demoTimes = ["09:00", "10:30", "14:00", "18:30", "21:30"];
 const customProfilesKey = "aabw-next-move-custom-profiles";
 const completedItemsKey = "aabw-next-move-completed-items";
 const selectedStateKey = "aabw-next-move-selected-state";
+const sessionIdKey = "aabw-next-move-session-id";
 
 type DraftProfile = Omit<BuilderProfile, "goals" | "stack" | "skillGaps"> & {
   goals: string;
@@ -85,6 +87,22 @@ type AiInsight = {
   beforeDemo: string;
   risk: string;
   reason?: string;
+};
+
+type RetrievalMatch = {
+  id: string;
+  sourceType: "event" | "resource" | "mentor" | "deadline" | "venue";
+  sourceId: string;
+  title: string;
+  body: string;
+  tags: string[];
+  similarity: number;
+};
+
+type RetrievalPayload = {
+  source: "pgvector" | "keyword";
+  reason?: string;
+  matches: RetrievalMatch[];
 };
 
 function toMinutes(time: string) {
@@ -255,6 +273,14 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
+function createSessionId() {
+  if (typeof window !== "undefined" && "randomUUID" in window.crypto) {
+    return window.crypto.randomUUID();
+  }
+
+  return `session-${Date.now()}`;
+}
+
 function actionPlanText({
   profile,
   dayMeta,
@@ -291,11 +317,15 @@ function actionPlanText({
 export function NextMoveDashboard() {
   const [eventData, setEventData] = useState<EventDataPayload>(() => defaultEventData());
   const [aiInsight, setAiInsight] = useState<AiInsight | null>(null);
+  const [retrievalMatches, setRetrievalMatches] = useState<RetrievalMatch[]>([]);
+  const [retrievalSource, setRetrievalSource] = useState<RetrievalPayload["source"]>("keyword");
   const [customProfiles, setCustomProfiles] = useState<BuilderProfile[]>([]);
   const [profileId, setProfileId] = useState(seedProfiles[0].id);
   const [selectedDay, setSelectedDay] = useState<EventDay>(2);
   const [selectedTime, setSelectedTime] = useState("10:30");
   const [completedItems, setCompletedItems] = useState<string[]>([]);
+  const [sessionId, setSessionId] = useState("");
+  const [hasLoadedRemoteChecklist, setHasLoadedRemoteChecklist] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
 
   const allProfiles = useMemo(
@@ -336,6 +366,20 @@ export function NextMoveDashboard() {
   const readiness = Math.round(
     (actionItems.filter((item) => completedItems.includes(item)).length / Math.max(1, actionItems.length)) * 100,
   );
+  const retrievalQuery = useMemo(
+    () =>
+      [
+        profile.name,
+        profile.project,
+        `goals ${profile.goals.join(" ")}`,
+        `stack ${profile.stack.join(" ")}`,
+        `gaps ${profile.skillGaps.join(" ")}`,
+        `priority ${profile.priority}`,
+        `${dayMeta.label} ${dayMeta.theme} ${selectedTime}`,
+        rec.best.title,
+      ].join(" "),
+    [dayMeta.label, dayMeta.theme, profile, rec.best.title, selectedTime],
+  );
 
   useEffect(() => {
     const storedProfiles = readJson<BuilderProfile[]>(customProfilesKey, []);
@@ -345,12 +389,15 @@ export function NextMoveDashboard() {
       selectedDay: 2,
       selectedTime: "10:30",
     });
+    const storedSessionId = window.localStorage.getItem(sessionIdKey) ?? createSessionId();
+    window.localStorage.setItem(sessionIdKey, storedSessionId);
 
     setCustomProfiles(storedProfiles);
     setCompletedItems(storedCompleted);
     setProfileId(storedState.profileId);
     setSelectedDay(storedState.selectedDay);
     setSelectedTime(storedState.selectedTime);
+    setSessionId(storedSessionId);
     setIsHydrated(true);
   }, []);
 
@@ -375,6 +422,31 @@ export function NextMoveDashboard() {
       isActive = false;
     };
   }, []);
+
+  useEffect(() => {
+    let isActive = true;
+
+    fetch("/api/retrieval", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: retrievalQuery, matchCount: 5 }),
+    })
+      .then((response) => response.json() as Promise<RetrievalPayload>)
+      .then((payload) => {
+        if (!isActive) return;
+        setRetrievalMatches(payload.matches ?? []);
+        setRetrievalSource(payload.source ?? "keyword");
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setRetrievalMatches([]);
+        setRetrievalSource("keyword");
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [retrievalQuery]);
 
   useEffect(() => {
     let isActive = true;
@@ -404,6 +476,12 @@ export function NextMoveDashboard() {
             }
           : undefined,
         deadlineTitle: deadlineQueue[0]?.title,
+        retrievalContext: retrievalMatches.slice(0, 4).map((match) => ({
+          title: match.title,
+          body: match.body,
+          sourceType: match.sourceType,
+          similarity: match.similarity,
+        })),
         deterministicExplanation: rec.explanation,
       }),
     })
@@ -427,7 +505,7 @@ export function NextMoveDashboard() {
     return () => {
       isActive = false;
     };
-  }, [dayMeta.label, dayMeta.theme, deadlineQueue, eventData.venues, profile, rec, selectedTime]);
+  }, [dayMeta.label, dayMeta.theme, deadlineQueue, eventData.venues, profile, rec, retrievalMatches, selectedTime]);
 
   useEffect(() => {
     setDraftProfile(toDraftProfile(profile));
@@ -442,6 +520,44 @@ export function NextMoveDashboard() {
     if (!isHydrated) return;
     window.localStorage.setItem(completedItemsKey, JSON.stringify(completedItems));
   }, [completedItems, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated || !sessionId) return;
+    let isActive = true;
+
+    fetch(`/api/checklist?sessionId=${encodeURIComponent(sessionId)}`)
+      .then((response) => response.json() as Promise<{ completedItems: string[]; persisted: boolean }>)
+      .then((payload) => {
+        if (!isActive) return;
+        if (payload.persisted && payload.completedItems.length > 0) {
+          setCompletedItems((current) => Array.from(new Set([...current, ...payload.completedItems])));
+        }
+        setHasLoadedRemoteChecklist(true);
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setHasLoadedRemoteChecklist(true);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [isHydrated, sessionId]);
+
+  useEffect(() => {
+    if (!isHydrated || !sessionId || !hasLoadedRemoteChecklist) return;
+
+    fetch("/api/checklist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        items: actionItems.map((id) => ({ id, completed: completedItems.includes(id) })),
+      }),
+    }).catch(() => {
+      // Local storage remains the offline fallback when Supabase is unavailable.
+    });
+  }, [actionItems, completedItems, hasLoadedRemoteChecklist, isHydrated, sessionId]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -488,14 +604,18 @@ export function NextMoveDashboard() {
   };
 
   const resetWorkspace = () => {
+    const nextSessionId = createSessionId();
     setCustomProfiles([]);
     setCompletedItems([]);
     setProfileId(seedProfiles[0].id);
     setSelectedDay(2);
     setSelectedTime("10:30");
+    setSessionId(nextSessionId);
+    setHasLoadedRemoteChecklist(true);
     window.localStorage.removeItem(customProfilesKey);
     window.localStorage.removeItem(completedItemsKey);
     window.localStorage.removeItem(selectedStateKey);
+    window.localStorage.setItem(sessionIdKey, nextSessionId);
     toast.success("Demo workspace reset");
   };
 
@@ -537,6 +657,7 @@ export function NextMoveDashboard() {
               <div className="flex flex-wrap justify-end gap-2">
                 <Badge variant="secondary">{eventData.source === "supabase" ? "Supabase live" : "Mock fallback"}</Badge>
                 <Badge variant="outline">{aiInsight?.source === "openai" ? "OpenAI on" : "AI fallback"}</Badge>
+                <Badge variant="outline">{retrievalSource === "pgvector" ? "pgvector" : "keyword RAG"}</Badge>
               </div>
             </CardAction>
           </CardHeader>
@@ -743,6 +864,55 @@ export function NextMoveDashboard() {
         />
       </div>
 
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <MapPin className="size-4 text-primary" />
+              Venue map
+            </CardTitle>
+            <CardDescription>OpenStreetMap venue context for the current and recommended move.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <VenueMap
+              venues={eventData.venues}
+              currentVenueId={profile.currentVenue}
+              recommendedVenueId={rec.best.venueId}
+            />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Semantic retrieval</CardTitle>
+            <CardDescription>
+              {retrievalSource === "pgvector"
+                ? "Matches retrieved from Supabase pgvector."
+                : "Keyword fallback until event document embeddings are seeded."}
+            </CardDescription>
+            <CardAction>
+              <Badge variant={retrievalSource === "pgvector" ? "default" : "outline"}>{retrievalSource}</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {retrievalMatches.slice(0, 4).map((match) => (
+              <div key={match.id} className="rounded-lg border bg-background/60 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{match.title}</div>
+                    <div className="mt-1 line-clamp-2 text-muted-foreground text-sm">{match.body}</div>
+                  </div>
+                  <Badge variant="outline">{match.sourceType}</Badge>
+                </div>
+                <div className="mt-2 text-muted-foreground text-xs">
+                  similarity {Math.round(match.similarity * 100)}%
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr_1fr]">
         <Card>
           <CardHeader>
@@ -909,6 +1079,88 @@ function MetricCard({
       </CardContent>
     </Card>
   );
+}
+
+function VenueMap({
+  venues,
+  currentVenueId,
+  recommendedVenueId,
+}: {
+  venues: Venue[];
+  currentVenueId: string;
+  recommendedVenueId: string;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current || venues.length === 0) return;
+
+    let isActive = true;
+    let map: import("leaflet").Map | undefined;
+
+    void import("leaflet").then((L) => {
+      if (!isActive || !containerRef.current) return;
+
+      const center =
+        venues.find((venue) => venue.id === recommendedVenueId) ??
+        venues.find((venue) => venue.id === currentVenueId) ??
+        venues[0];
+
+      map = L.map(containerRef.current, {
+        attributionControl: true,
+        scrollWheelZoom: false,
+      }).setView([center.lat, center.lng], 13);
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19,
+      }).addTo(map);
+
+      for (const venue of venues) {
+        const isCurrent = venue.id === currentVenueId;
+        const isRecommended = venue.id === recommendedVenueId;
+        const color = isRecommended
+          ? "hsl(var(--primary))"
+          : isCurrent
+            ? "hsl(var(--chart-2))"
+            : "hsl(var(--muted-foreground))";
+        const label = isRecommended ? "Recommended" : isCurrent ? "Current" : "Venue";
+
+        L.marker([venue.lat, venue.lng], {
+          icon: L.divIcon({
+            className: "",
+            html: `<span style="display:block;width:18px;height:18px;border-radius:999px;background:${color};border:3px solid hsl(var(--background));box-shadow:0 6px 18px rgba(0,0,0,.24)"></span>`,
+            iconAnchor: [9, 9],
+            iconSize: [18, 18],
+          }),
+        })
+          .addTo(map)
+          .bindPopup(
+            `<strong>${escapeHtml(venue.name)}</strong><br/><span>${escapeHtml(label)}</span><br/>${escapeHtml(
+              venue.travelNote,
+            )}`,
+          );
+      }
+
+      window.setTimeout(() => map?.invalidateSize(), 0);
+    });
+
+    return () => {
+      isActive = false;
+      map?.remove();
+    };
+  }, [currentVenueId, recommendedVenueId, venues]);
+
+  return <div ref={containerRef} className="h-72 overflow-hidden rounded-lg border bg-muted" />;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function ActionStep({

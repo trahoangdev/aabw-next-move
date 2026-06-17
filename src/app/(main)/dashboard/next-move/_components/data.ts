@@ -17,6 +17,8 @@ export interface Venue {
   name: string;
   area: string;
   travelNote: string;
+  lat: number;
+  lng: number;
 }
 
 export interface EventBlock {
@@ -74,24 +76,32 @@ export const venues: Venue[] = [
     name: "AABW Main Venue",
     area: "District 1",
     travelNote: "Central hackathon floor. Keep 10 minutes for badge and lift queues.",
+    lat: 10.7769,
+    lng: 106.7009,
   },
   {
     id: "cloud-hub",
     name: "Cloud Partner Hub",
     area: "District 1",
     travelNote: "12 minutes from main venue by ride hailing in normal traffic.",
+    lat: 10.7816,
+    lng: 106.7055,
   },
   {
     id: "model-lab",
     name: "Model Lab",
     area: "Thu Thiem",
     travelNote: "Plan 25 minutes from District 1; bridge traffic spikes after 17:00.",
+    lat: 10.7762,
+    lng: 106.7205,
   },
   {
     id: "community",
     name: "Community Night Space",
     area: "District 3",
     travelNote: "Best for team matching, mentor intros, and informal project feedback.",
+    lat: 10.7844,
+    lng: 106.6844,
   },
 ];
 
