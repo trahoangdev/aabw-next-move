@@ -3,9 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  AlarmClockCheck,
+  AlertTriangle,
   ArrowRight,
   BadgeCheck,
   CalendarClock,
+  CalendarPlus,
   CheckCircle2,
   ClipboardCheck,
   ClipboardCopy,
@@ -13,12 +16,16 @@ import {
   Compass,
   Flag,
   Gauge,
+  Handshake,
   Lightbulb,
   MapPin,
+  Megaphone,
   Pencil,
+  RadioTower,
   RotateCcw,
   Route,
   Save,
+  ShieldCheck,
   Sparkles,
   Trash2,
   UserPlus,
@@ -122,9 +129,48 @@ type SavedRecommendation = {
   createdAt: string;
 };
 
+type TriageItem = {
+  id: string;
+  title: string;
+  detail: string;
+  kind: "venue" | "mentor" | "perk" | "deadline" | "team" | "community";
+};
+
+type LaunchItem = {
+  id: string;
+  title: string;
+  detail: string;
+};
+
+type RiskLevel = "critical" | "watch" | "clear";
+
+type EventModeSignal = {
+  id: string;
+  title: string;
+  detail: string;
+  level: RiskLevel;
+};
+
+type TeamMatch = {
+  profile: BuilderProfile;
+  score: number;
+  reasons: string[];
+  ask: string;
+  offer: string;
+};
+
 function toMinutes(time: string) {
   const [hours, minutes] = time.split(":").map(Number);
   return hours * 60 + minutes;
+}
+
+function formatMinuteDelta(minutes: number) {
+  if (minutes === 0) return "now";
+  const absMinutes = Math.abs(minutes);
+  const hours = Math.floor(absMinutes / 60);
+  const remaining = absMinutes % 60;
+  const parts = [hours ? `${hours}h` : null, remaining ? `${remaining}m` : null].filter(Boolean).join(" ");
+  return minutes > 0 ? `in ${parts}` : `${parts} ago`;
 }
 
 function overlapScore(a: string[], b: string[]) {
@@ -248,8 +294,117 @@ function relevantMentors(mentorList: typeof mockMentors, profile: BuilderProfile
     .slice(0, 3);
 }
 
+function recommendedTeamMatches(profileList: BuilderProfile[], profile: BuilderProfile) {
+  return profileList
+    .filter((candidate) => candidate.id !== profile.id)
+    .map<TeamMatch>((candidate) => {
+      const gapCoverage = candidate.stack.filter((signal) => profile.skillGaps.includes(signal));
+      const goalCoverage = candidate.goals.filter((signal) => profile.skillGaps.includes(signal));
+      const covers = Array.from(new Set([...gapCoverage, ...goalCoverage]));
+      const reciprocalOffer = profile.stack.filter((signal) => candidate.skillGaps.includes(signal));
+      const sharedGoals = candidate.goals.filter((signal) => profile.goals.includes(signal));
+      const priorityBoost = candidate.priority === "find-team" || profile.priority === "find-team" ? 8 : 0;
+      const score = Math.min(
+        96,
+        48 + covers.length * 16 + reciprocalOffer.length * 12 + sharedGoals.length * 8 + priorityBoost,
+      );
+      const reasons = [
+        covers.length ? `covers your ${covers.join(", ")} gap` : null,
+        reciprocalOffer.length ? `you can offer ${reciprocalOffer.join(", ")}` : null,
+        sharedGoals.length ? `shared ${sharedGoals.join(", ")} goal` : null,
+      ].filter(Boolean) as string[];
+
+      return {
+        profile: candidate,
+        score,
+        reasons: reasons.length ? reasons : ["adjacent Builder Experience project"],
+        ask: covers.length
+          ? `Ask for help with ${covers.join(", ")}`
+          : `Compare ${candidate.priority.replace("-", " ")} notes`,
+        offer: reciprocalOffer.length
+          ? `Offer ${reciprocalOffer.join(", ")} help`
+          : `Offer feedback on ${profile.project}`,
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+}
+
 function activeDeadlines(deadlineList: typeof mockDeadlines, day: EventDay) {
   return deadlineList.filter((deadline) => deadline.day >= day).slice(0, 3);
+}
+
+function deadlineMinutesFromNow(deadline: (typeof mockDeadlines)[number], day: EventDay, selectedTime: string) {
+  return (deadline.day - day) * 24 * 60 + toMinutes(deadline.time) - toMinutes(selectedTime);
+}
+
+function liveEventSignals({
+  best,
+  profile,
+  day,
+  selectedTime,
+  currentVenue,
+  venueList,
+  deadlineQueue,
+  mentorName,
+  resourceTitle,
+}: {
+  best: EventBlock;
+  profile: BuilderProfile;
+  day: EventDay;
+  selectedTime: string;
+  currentVenue: Venue;
+  venueList: typeof mockVenues;
+  deadlineQueue: typeof mockDeadlines;
+  mentorName?: string;
+  resourceTitle?: string;
+}): EventModeSignal[] {
+  const minutesUntil = toMinutes(best.time) - toMinutes(selectedTime);
+  const recommendedVenue = venueList.find((venue) => venue.id === best.venueId) ?? currentVenue;
+  const movingVenue = best.venueId !== profile.currentVenue;
+  const topDeadline = deadlineQueue[0];
+  const deadlineDelta = topDeadline ? deadlineMinutesFromNow(topDeadline, day, selectedTime) : undefined;
+
+  const movementLevel: RiskLevel =
+    movingVenue && minutesUntil <= 45 ? "critical" : movingVenue && minutesUntil <= 120 ? "watch" : "clear";
+  const movementDetail = movingVenue
+    ? `${recommendedVenue.travelNote} ${best.title} starts ${formatMinuteDelta(minutesUntil)}.`
+    : `${best.title} is at your current venue. Find the room and arrive before ${best.time}.`;
+
+  const deadlineLevel: RiskLevel =
+    deadlineDelta === undefined
+      ? "clear"
+      : deadlineDelta <= 180
+        ? "critical"
+        : deadlineDelta <= 36 * 60
+          ? "watch"
+          : "clear";
+  const deadlineDetail = topDeadline
+    ? `${topDeadline.title} is ${formatMinuteDelta(deadlineDelta ?? 0)}: ${topDeadline.detail}`
+    : "No active deadline is queued for the selected day.";
+
+  return [
+    {
+      id: "movement",
+      title: movingVenue ? `Move from ${currentVenue.area}` : "Stay and check the room",
+      detail: movementDetail,
+      level: movementLevel,
+    },
+    {
+      id: "deadline",
+      title: topDeadline ? "Deadline guardrail" : "Deadline clear",
+      detail: deadlineDetail,
+      level: deadlineLevel,
+    },
+    {
+      id: "support",
+      title: mentorName ? `Ask ${mentorName}` : "Open support route",
+      detail: mentorName
+        ? `Use this before you lose momentum. Matched resource: ${resourceTitle ?? "event help desk or Discord"}.`
+        : "Copy the help request and route it through Discord, WhatsApp, or the on-site support desk.",
+      level: mentorName ? "clear" : "watch",
+    },
+  ];
 }
 
 function splitSignals(value: string) {
@@ -306,6 +461,7 @@ function actionPlanText({
   next,
   explanation,
   deadlineTitle,
+  triageItems,
   venueList,
 }: {
   profile: BuilderProfile;
@@ -315,6 +471,7 @@ function actionPlanText({
   next?: EventBlock;
   explanation: string;
   deadlineTitle?: string;
+  triageItems?: TriageItem[];
   venueList: typeof mockVenues;
 }) {
   return [
@@ -328,7 +485,189 @@ function actionPlanText({
     "",
     next ? `NEXT: ${next.title} (${next.time}-${next.endTime})` : "NEXT: Capture notes and update the README.",
     deadlineTitle ? `BEFORE DEMO: ${deadlineTitle}` : "BEFORE DEMO: Keep a fallback demo video and seeded data ready.",
+    ...(triageItems?.length
+      ? ["", "LIVE TRIAGE:", ...triageItems.map((item) => `- ${item.title}: ${item.detail}`)]
+      : []),
   ].join("\n");
+}
+
+function supportRequestText({
+  profile,
+  dayMeta,
+  selectedTime,
+  best,
+  mentorName,
+  resourceTitle,
+  deadlineTitle,
+  venueList,
+}: {
+  profile: BuilderProfile;
+  dayMeta: (typeof eventDays)[number];
+  selectedTime: string;
+  best: EventBlock;
+  mentorName?: string;
+  resourceTitle?: string;
+  deadlineTitle?: string;
+  venueList: typeof mockVenues;
+}) {
+  return [
+    `AABW Builder help request - ${profile.name}`,
+    `Project: ${profile.project}`,
+    `Now: ${dayMeta.label} ${dayMeta.theme}, ${selectedTime}`,
+    `Next move: ${best.title} at ${venueName(best.venueId, venueList)}`,
+    `Need help with: ${profile.skillGaps.join(", ") || profile.priority.replace("-", " ")}`,
+    mentorName ? `Best mentor/support lead: ${mentorName}` : null,
+    resourceTitle ? `Relevant resource/perk: ${resourceTitle}` : null,
+    deadlineTitle ? `Deadline to protect: ${deadlineTitle}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function onsiteBriefText({
+  profile,
+  dayMeta,
+  selectedTime,
+  best,
+  signals,
+  triageItems,
+  venueList,
+}: {
+  profile: BuilderProfile;
+  dayMeta: (typeof eventDays)[number];
+  selectedTime: string;
+  best: EventBlock;
+  signals: EventModeSignal[];
+  triageItems: TriageItem[];
+  venueList: typeof mockVenues;
+}) {
+  return [
+    `AABW Event Mode - ${profile.name}`,
+    `${dayMeta.label} ${dayMeta.theme}, ${selectedTime}`,
+    "",
+    `GO NOW: ${best.title}`,
+    `Where: ${venueName(best.venueId, venueList)}`,
+    `When: ${best.time}-${best.endTime}`,
+    "",
+    "RISK CHECK:",
+    ...signals.map((signal) => `- ${signal.level.toUpperCase()}: ${signal.title} - ${signal.detail}`),
+    "",
+    "NEXT 3 TRIAGE ITEMS:",
+    ...triageItems.slice(0, 3).map((item) => `- ${item.title}: ${item.detail}`),
+  ].join("\n");
+}
+
+function teamIntroText({ profile, matches }: { profile: BuilderProfile; matches: TeamMatch[] }) {
+  return [
+    `AABW team radar - ${profile.name}`,
+    `Project: ${profile.project}`,
+    `Looking for: ${profile.skillGaps.join(", ") || profile.priority.replace("-", " ")}`,
+    `Can offer: ${profile.stack.join(", ") || "product feedback and build support"}`,
+    "",
+    "Suggested intros:",
+    ...matches.map(
+      (match, index) =>
+        `${index + 1}. ${match.profile.name} (${match.score}%) - ${match.reasons.join("; ")}. Ask: ${match.ask}. Offer: ${match.offer}.`,
+    ),
+    "",
+    "If you are nearby, reply with your role, stack, current venue, and the blocker you can help clear.",
+  ].join("\n");
+}
+
+function progressUpdateText({
+  profile,
+  dayMeta,
+  selectedTime,
+  best,
+  topTriageTitle,
+  venueList,
+}: {
+  profile: BuilderProfile;
+  dayMeta: (typeof eventDays)[number];
+  selectedTime: string;
+  best: EventBlock;
+  topTriageTitle?: string;
+  venueList: typeof mockVenues;
+}) {
+  return [
+    `Building for the Builder Experience track: ${profile.project}`,
+    "",
+    `Current AABW context: ${dayMeta.label} ${dayMeta.theme}, ${selectedTime}`,
+    `Recommended next move: ${best.title} at ${venueName(best.venueId, venueList)}`,
+    topTriageTitle ? `Live blocker to clear: ${topTriageTitle}` : null,
+    "",
+    "AABW Next Move helps builders act faster, cut schedule/venue confusion, find the right mentor or perk, and protect Demo Day deadlines.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function devpostSummaryText({
+  profile,
+  best,
+  venueList,
+}: {
+  profile: BuilderProfile;
+  best: EventBlock;
+  venueList: typeof mockVenues;
+}) {
+  return [
+    "Project: AABW Next Move",
+    "",
+    "Tagline: A live AI copilot that helps Agentic AI Build Week builders decide what to do next across schedules, venues, mentors, perks, deadlines, and Demo Day.",
+    "",
+    `Target builder: ${profile.name}`,
+    `Pain point: ${profile.project}`,
+    `Demo moment: ${best.title} at ${venueName(best.venueId, venueList)}`,
+    "",
+    "Why it fits Builder Experience: It is a working live-event workflow, not a chatbot wrapper. It combines deterministic time/venue/deadline guardrails with AI explanations, retrieval over event data, venue maps, live triage, team matching, saved action plans, and copyable support/share outputs.",
+  ].join("\n");
+}
+
+function calendarDate(day: EventDay) {
+  const dateByDay: Record<EventDay, string> = {
+    1: "20260708",
+    2: "20260709",
+    3: "20260710",
+    4: "20260711",
+    5: "20260712",
+  };
+  return dateByDay[day];
+}
+
+function calendarHoldText({
+  profile,
+  block,
+  venueList,
+}: {
+  profile: BuilderProfile;
+  block: EventBlock;
+  venueList: typeof mockVenues;
+}) {
+  const date = calendarDate(block.day);
+  const start = block.time.replace(":", "");
+  const end = block.endTime.replace(":", "");
+  const description = [
+    `AABW Next Move recommendation for ${profile.name}.`,
+    block.outcome,
+    `Tags: ${block.tags.join(", ")}`,
+  ].join("\\n");
+
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//AABW Next Move//Builder Experience//EN",
+    "BEGIN:VEVENT",
+    `UID:${block.id}-${profile.id}@aabw-next-move`,
+    `DTSTAMP:${date}T000000Z`,
+    `DTSTART:${date}T${start}00`,
+    `DTEND:${date}T${end}00`,
+    `SUMMARY:${block.title}`,
+    `LOCATION:${venueName(block.venueId, venueList)}`,
+    `DESCRIPTION:${description}`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
 }
 
 export function NextMoveDashboard() {
@@ -377,14 +716,113 @@ export function NextMoveDashboard() {
     () => rankedDayBlocks(eventData.schedule, profile, selectedDay, selectedTime),
     [eventData.schedule, profile, selectedDay, selectedTime],
   );
-  const actionItems = useMemo(
+  const teamMatches = useMemo(() => recommendedTeamMatches(allProfiles, profile), [allProfiles, profile]);
+  const triageItems = useMemo<TriageItem[]>(() => {
+    const recommendedVenue = eventData.venues.find((venue) => venue.id === rec.best.venueId) ?? currentVenue;
+    const topMentor = mentorMatches[0]?.mentor;
+    const topResource = resourceMatches[0]?.resource;
+    const topDeadline = deadlineQueue[0];
+    const topTeamMatch = teamMatches[0];
+    const shouldMove = rec.best.venueId !== profile.currentVenue;
+
+    return [
+      {
+        id: `triage:venue:${rec.best.id}`,
+        kind: "venue",
+        title: shouldMove ? `Move to ${recommendedVenue.name}` : `Stay at ${recommendedVenue.name}`,
+        detail: shouldMove
+          ? `${recommendedVenue.travelNote} Leave before ${rec.best.time} for ${rec.best.title}.`
+          : `Join ${rec.best.title} on site and confirm the room before it fills.`,
+      },
+      topMentor
+        ? {
+            id: `triage:mentor:${topMentor.id}`,
+            kind: "mentor",
+            title: `Ask ${topMentor.name}`,
+            detail: `${topMentor.focus}. Best slot: ${topMentor.slot}.`,
+          }
+        : null,
+      topResource
+        ? {
+            id: `triage:perk:${topResource.id}`,
+            kind: "perk",
+            title: `Use ${topResource.title}`,
+            detail: topResource.action,
+          }
+        : null,
+      topDeadline
+        ? {
+            id: `triage:deadline:${topDeadline.id}`,
+            kind: "deadline",
+            title: `Protect ${topDeadline.title}`,
+            detail: `Day ${topDeadline.day}, ${topDeadline.time}. ${topDeadline.detail}`,
+          }
+        : null,
+      topTeamMatch
+        ? {
+            id: `triage:team:${topTeamMatch.profile.id}`,
+            kind: "team",
+            title: `Talk to ${topTeamMatch.profile.name}`,
+            detail: `${topTeamMatch.reasons.join("; ")}. ${topTeamMatch.ask}.`,
+          }
+        : null,
+      {
+        id: "triage:community-share",
+        kind: "community",
+        title: "Share progress in Discord",
+        detail:
+          "Post your next move, blocker, missing role, or support request so the community can route help faster.",
+      },
+    ].filter(Boolean) as TriageItem[];
+  }, [
+    currentVenue,
+    deadlineQueue,
+    eventData.venues,
+    mentorMatches,
+    profile.currentVenue,
+    rec.best,
+    resourceMatches,
+    teamMatches,
+  ]);
+  const launchItems = useMemo<LaunchItem[]>(
     () => [
-      `move:${rec.best.id}`,
-      rec.next ? `next:${rec.next.id}` : "next:notes",
-      "before-demo",
-      ...deadlineQueue.map((deadline) => `deadline:${deadline.id}`),
+      {
+        id: "launch:problem",
+        title: "State the live builder pain point",
+        detail: "Make the Devpost story start with schedule, venue, mentor, perk, and deadline confusion during AABW.",
+      },
+      {
+        id: "launch:workflow",
+        title: "Show the workflow, not a chatbot",
+        detail:
+          "Demo profile context, Next Move, venue map focus, live triage, Team Radar, saved plan, and copyable support request.",
+      },
+      {
+        id: "launch:share",
+        title: "Share a progress update",
+        detail: "Post a concise update in Discord so other builders can understand, test, and vote.",
+      },
+      {
+        id: "launch:deploy",
+        title: "Explain live deployment fit",
+        detail:
+          "Call out self-contained public data, Supabase persistence, pgvector retrieval, and Vercel deployment path.",
+      },
     ],
-    [deadlineQueue, rec.best.id, rec.next],
+    [],
+  );
+  const actionItems = useMemo(
+    () =>
+      [
+        `move:${rec.best.id}`,
+        rec.next ? `next:${rec.next.id}` : "next:notes",
+        "before-demo",
+        ...deadlineQueue.map((deadline) => `deadline:${deadline.id}`),
+        teamMatches.length ? "team:intro" : null,
+        ...triageItems.map((item) => item.id),
+        ...launchItems.map((item) => item.id),
+      ].filter(Boolean) as string[],
+    [deadlineQueue, launchItems, rec.best.id, rec.next, teamMatches.length, triageItems],
   );
   const readiness = Math.round(
     (actionItems.filter((item) => completedItems.includes(item)).length / Math.max(1, actionItems.length)) * 100,
@@ -413,10 +851,85 @@ export function NextMoveDashboard() {
         next: rec.next,
         explanation: aiInsight?.explanation ?? rec.explanation,
         deadlineTitle: deadlineQueue[0]?.title,
+        triageItems,
         venueList: eventData.venues,
       }),
-    [aiInsight?.explanation, dayMeta, deadlineQueue, eventData.venues, profile, rec, selectedTime],
+    [aiInsight?.explanation, dayMeta, deadlineQueue, eventData.venues, profile, rec, selectedTime, triageItems],
   );
+  const supportRequest = useMemo(
+    () =>
+      supportRequestText({
+        profile,
+        dayMeta,
+        selectedTime,
+        best: rec.best,
+        mentorName: mentorMatches[0]?.mentor.name,
+        resourceTitle: resourceMatches[0]?.resource.title,
+        deadlineTitle: deadlineQueue[0]?.title,
+        venueList: eventData.venues,
+      }),
+    [dayMeta, deadlineQueue, eventData.venues, mentorMatches, profile, rec.best, resourceMatches, selectedTime],
+  );
+  const progressUpdate = useMemo(
+    () =>
+      progressUpdateText({
+        profile,
+        dayMeta,
+        selectedTime,
+        best: rec.best,
+        topTriageTitle: triageItems[0]?.title,
+        venueList: eventData.venues,
+      }),
+    [dayMeta, eventData.venues, profile, rec.best, selectedTime, triageItems],
+  );
+  const devpostSummary = useMemo(
+    () =>
+      devpostSummaryText({
+        profile,
+        best: rec.best,
+        venueList: eventData.venues,
+      }),
+    [eventData.venues, profile, rec.best],
+  );
+  const eventSignals = useMemo(
+    () =>
+      liveEventSignals({
+        best: rec.best,
+        profile,
+        day: selectedDay,
+        selectedTime,
+        currentVenue,
+        venueList: eventData.venues,
+        deadlineQueue,
+        mentorName: mentorMatches[0]?.mentor.name,
+        resourceTitle: resourceMatches[0]?.resource.title,
+      }),
+    [
+      currentVenue,
+      deadlineQueue,
+      eventData.venues,
+      mentorMatches,
+      profile,
+      rec.best,
+      resourceMatches,
+      selectedDay,
+      selectedTime,
+    ],
+  );
+  const onsiteBrief = useMemo(
+    () =>
+      onsiteBriefText({
+        profile,
+        dayMeta,
+        selectedTime,
+        best: rec.best,
+        signals: eventSignals,
+        triageItems,
+        venueList: eventData.venues,
+      }),
+    [dayMeta, eventData.venues, eventSignals, profile, rec.best, selectedTime, triageItems],
+  );
+  const teamIntro = useMemo(() => teamIntroText({ profile, matches: teamMatches }), [profile, teamMatches]);
 
   useEffect(() => {
     const storedProfiles = readJson<BuilderProfile[]>(customProfilesKey, []);
@@ -690,6 +1203,64 @@ export function NextMoveDashboard() {
     } catch {
       toast.error("Could not copy action plan");
     }
+  };
+
+  const copySupportRequest = async () => {
+    try {
+      await navigator.clipboard.writeText(supportRequest);
+      toast.success("Support request copied");
+    } catch {
+      toast.error("Could not copy support request");
+    }
+  };
+
+  const copyProgressUpdate = async () => {
+    try {
+      await navigator.clipboard.writeText(progressUpdate);
+      toast.success("Progress update copied");
+    } catch {
+      toast.error("Could not copy progress update");
+    }
+  };
+
+  const copyDevpostSummary = async () => {
+    try {
+      await navigator.clipboard.writeText(devpostSummary);
+      toast.success("Devpost summary copied");
+    } catch {
+      toast.error("Could not copy Devpost summary");
+    }
+  };
+
+  const copyOnsiteBrief = async () => {
+    try {
+      await navigator.clipboard.writeText(onsiteBrief);
+      toast.success("Event brief copied");
+    } catch {
+      toast.error("Could not copy event brief");
+    }
+  };
+
+  const copyTeamIntro = async () => {
+    try {
+      await navigator.clipboard.writeText(teamIntro);
+      toast.success("Team intro copied");
+    } catch {
+      toast.error("Could not copy team intro");
+    }
+  };
+
+  const downloadCalendarHold = () => {
+    const blob = new Blob([calendarHoldText({ profile, block: rec.best, venueList: eventData.venues })], {
+      type: "text/calendar;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `aabw-next-move-${rec.best.id}.ics`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success("Calendar hold downloaded");
   };
 
   const savePlan = async () => {
@@ -980,7 +1551,24 @@ export function NextMoveDashboard() {
         />
       </div>
 
+      <EventModePanel
+        best={rec.best}
+        currentVenue={currentVenue}
+        selectedTime={selectedTime}
+        signals={eventSignals}
+        venueList={eventData.venues}
+        onCopyBrief={copyOnsiteBrief}
+        onDownloadCalendar={downloadCalendarHold}
+      />
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr_1fr]">
+        <LiveTriage
+          items={triageItems}
+          completedItems={completedItems}
+          onToggle={toggleCompleted}
+          onCopySupport={copySupportRequest}
+        />
+
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -1036,8 +1624,6 @@ export function NextMoveDashboard() {
             ))}
           </CardContent>
         </Card>
-
-        <SavedPlans recommendations={savedRecommendations} onDelete={deleteSavedPlan} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr_1fr]">
@@ -1086,6 +1672,13 @@ export function NextMoveDashboard() {
             ))}
           </CardContent>
         </Card>
+
+        <TeamRadar
+          matches={teamMatches}
+          checked={completedItems.includes("team:intro")}
+          onToggle={() => toggleCompleted("team:intro")}
+          onCopyIntro={copyTeamIntro}
+        />
 
         <Card>
           <CardHeader>
@@ -1141,19 +1734,29 @@ export function NextMoveDashboard() {
             </div>
           </CardContent>
         </Card>
+
+        <LaunchKit
+          items={launchItems}
+          completedItems={completedItems}
+          onToggle={toggleCompleted}
+          onCopyProgress={copyProgressUpdate}
+          onCopyDevpost={copyDevpostSummary}
+        />
+
+        <SavedPlans recommendations={savedRecommendations} onDelete={deleteSavedPlan} />
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Why this helps builders</CardTitle>
-          <CardDescription>Workflow output, not a plain chat response.</CardDescription>
+          <CardDescription>Live workflow output, not a plain chat response.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           {[
-            "Cuts schedule confusion across multiple venues and days.",
-            "Turns project context into concrete next actions.",
-            "Persists profile and checklist state for real event use.",
-            "Can run on public or mock data, then integrate with live AABW data.",
+            "Act faster with one recommended move for the current day and time.",
+            "Cut confusion across venues, workshops, teammates, deadlines, mentors, and perks.",
+            "Get more out of the week with a live triage checklist and support request.",
+            "Stay self-contained with public or seeded data, ready for live AABW integration.",
           ].map((item) => (
             <div key={item} className="flex gap-3 rounded-lg border bg-muted/30 p-3 text-sm">
               <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
@@ -1178,6 +1781,306 @@ function SignalList({ title, values }: { title: string; values: string[] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+function EventModePanel({
+  best,
+  currentVenue,
+  selectedTime,
+  signals,
+  venueList,
+  onCopyBrief,
+  onDownloadCalendar,
+}: {
+  best: EventBlock;
+  currentVenue: Venue;
+  selectedTime: string;
+  signals: EventModeSignal[];
+  venueList: typeof mockVenues;
+  onCopyBrief: () => void;
+  onDownloadCalendar: () => void;
+}) {
+  const minutesUntil = toMinutes(best.time) - toMinutes(selectedTime);
+  const recommendedVenue = venueName(best.venueId, venueList);
+  const hasCriticalRisk = signals.some((signal) => signal.level === "critical");
+
+  return (
+    <Card className="overflow-hidden border-primary/20 bg-linear-to-r from-primary/10 via-card to-card shadow-xs">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-xl">
+          <span className="flex size-8 items-center justify-center rounded-lg border bg-background text-primary">
+            <RadioTower className="size-4" />
+          </span>
+          Event mode
+        </CardTitle>
+        <CardDescription>
+          Fast on-site command view for movement, support, and deadline risk before the next session.
+        </CardDescription>
+        <CardAction className="flex flex-wrap gap-2">
+          <Badge variant={hasCriticalRisk ? "destructive" : "secondary"}>
+            {hasCriticalRisk ? "risk now" : "on track"}
+          </Badge>
+          <Badge variant="outline">{formatMinuteDelta(minutesUntil)}</Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-lg border bg-background/70 p-4">
+          <div className="flex items-center gap-2 text-muted-foreground text-xs">
+            <AlarmClockCheck className="size-3.5" />
+            Room-ready decision
+          </div>
+          <div className="mt-2 font-heading font-medium text-2xl tracking-tight">{best.title}</div>
+          <p className="mt-2 text-muted-foreground text-sm">
+            {best.time}-{best.endTime} at {recommendedVenue}. Current base: {currentVenue.name}.
+          </p>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <Button type="button" onClick={onCopyBrief}>
+              <ClipboardCopy className="size-3.5" />
+              Copy event brief
+            </Button>
+            <Button type="button" variant="outline" onClick={onDownloadCalendar}>
+              <CalendarPlus className="size-3.5" />
+              Add calendar hold
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-3">
+          {signals.map((signal) => (
+            <div
+              key={signal.id}
+              className={cn(
+                "rounded-lg border bg-background/70 p-4",
+                signal.level === "critical" && "border-destructive/40 bg-destructive/5",
+                signal.level === "watch" && "border-primary/30 bg-primary/5",
+              )}
+            >
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-medium text-sm">
+                  {signal.level === "critical" ? (
+                    <AlertTriangle className="size-4 text-destructive" />
+                  ) : signal.level === "watch" ? (
+                    <ShieldCheck className="size-4 text-primary" />
+                  ) : (
+                    <CheckCircle2 className="size-4 text-primary" />
+                  )}
+                  {signal.title}
+                </div>
+                <Badge
+                  variant={
+                    signal.level === "critical" ? "destructive" : signal.level === "watch" ? "outline" : "secondary"
+                  }
+                  className="capitalize"
+                >
+                  {signal.level}
+                </Badge>
+              </div>
+              <p className="text-muted-foreground text-sm">{signal.detail}</p>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LiveTriage({
+  items,
+  completedItems,
+  onToggle,
+  onCopySupport,
+}: {
+  items: TriageItem[];
+  completedItems: string[];
+  onToggle: (id: string) => void;
+  onCopySupport: () => void;
+}) {
+  const completedCount = items.filter((item) => completedItems.includes(item.id)).length;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ClipboardCheck className="size-4 text-primary" />
+          Live triage
+        </CardTitle>
+        <CardDescription>
+          Builder pain points to clear before the next venue, mentor, perk, or deadline.
+        </CardDescription>
+        <CardAction>
+          <Badge variant="outline">
+            {completedCount}/{items.length} cleared
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {items.map((item) => {
+          const isChecked = completedItems.includes(item.id);
+          return (
+            <div key={item.id} className="flex gap-3 rounded-lg border bg-background/60 p-3">
+              <Checkbox
+                aria-label={`Mark ${item.title} complete`}
+                checked={isChecked}
+                onCheckedChange={() => onToggle(item.id)}
+              />
+              <span className="min-w-0">
+                <span className="mb-1 flex flex-wrap items-center gap-2">
+                  <span className={cn("font-medium text-sm", isChecked && "line-through opacity-60")}>
+                    {item.title}
+                  </span>
+                  <Badge variant="secondary" className="capitalize">
+                    {item.kind}
+                  </Badge>
+                </span>
+                <span className="block text-muted-foreground text-sm">{item.detail}</span>
+              </span>
+            </div>
+          );
+        })}
+        <Button type="button" variant="outline" className="w-full" onClick={onCopySupport}>
+          <ClipboardCopy className="size-3.5" />
+          Copy help request
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LaunchKit({
+  items,
+  completedItems,
+  onToggle,
+  onCopyProgress,
+  onCopyDevpost,
+}: {
+  items: LaunchItem[];
+  completedItems: string[];
+  onToggle: (id: string) => void;
+  onCopyProgress: () => void;
+  onCopyDevpost: () => void;
+}) {
+  const completedCount = items.filter((item) => completedItems.includes(item.id)).length;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Megaphone className="size-4 text-primary" />
+          Launch kit
+        </CardTitle>
+        <CardDescription>Submission and community-vote readiness for the Builder Experience track.</CardDescription>
+        <CardAction>
+          <Badge variant="outline">
+            {completedCount}/{items.length} ready
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {items.map((item) => {
+          const isChecked = completedItems.includes(item.id);
+          return (
+            <div key={item.id} className="flex gap-3 rounded-lg border bg-background/60 p-3">
+              <Checkbox
+                aria-label={`Mark ${item.title} ready`}
+                checked={isChecked}
+                onCheckedChange={() => onToggle(item.id)}
+              />
+              <span className="min-w-0">
+                <span className={cn("block font-medium text-sm", isChecked && "line-through opacity-60")}>
+                  {item.title}
+                </span>
+                <span className="mt-1 block text-muted-foreground text-sm">{item.detail}</span>
+              </span>
+            </div>
+          );
+        })}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button type="button" variant="outline" onClick={onCopyProgress}>
+            <ClipboardCopy className="size-3.5" />
+            Copy progress update
+          </Button>
+          <Button type="button" variant="outline" onClick={onCopyDevpost}>
+            <ClipboardCopy className="size-3.5" />
+            Copy Devpost summary
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TeamRadar({
+  matches,
+  checked,
+  onToggle,
+  onCopyIntro,
+}: {
+  matches: TeamMatch[];
+  checked: boolean;
+  onToggle: () => void;
+  onCopyIntro: () => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Handshake className="size-4 text-primary" />
+          Team radar
+        </CardTitle>
+        <CardDescription>Find nearby collaborators who can cover gaps and receive help back.</CardDescription>
+        <CardAction>
+          <Badge variant="outline">{matches.length} matches</Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex gap-3 rounded-lg border bg-muted/30 p-3">
+          <Checkbox aria-label="Mark team intro sent" checked={checked} onCheckedChange={onToggle} />
+          <span className="min-w-0">
+            <span className={cn("block font-medium text-sm", checked && "line-through opacity-60")}>
+              Send one targeted team intro
+            </span>
+            <span className="mt-1 block text-muted-foreground text-sm">
+              Use the suggested ask/offer language to find teammates without posting a vague request.
+            </span>
+          </span>
+        </div>
+
+        {matches.map((match) => (
+          <div key={match.profile.id} className="rounded-lg border bg-background/60 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-medium">{match.profile.name}</div>
+                <div className="mt-1 line-clamp-2 text-muted-foreground text-sm">{match.profile.project}</div>
+              </div>
+              <Badge variant={match.score >= 80 ? "default" : "outline"}>{match.score}%</Badge>
+            </div>
+            <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+              <div className="rounded-md bg-muted/40 p-2">
+                <span className="block text-muted-foreground text-xs">Ask</span>
+                {match.ask}
+              </div>
+              <div className="rounded-md bg-muted/40 p-2">
+                <span className="block text-muted-foreground text-xs">Offer</span>
+                {match.offer}
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {match.reasons.map((reason) => (
+                <Badge key={reason} variant="secondary">
+                  {reason}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        ))}
+
+        <Button type="button" variant="outline" className="w-full" onClick={onCopyIntro}>
+          <ClipboardCopy className="size-3.5" />
+          Copy team intro
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
