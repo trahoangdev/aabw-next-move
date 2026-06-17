@@ -1,43 +1,91 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   ArrowRight,
   BadgeCheck,
   CalendarClock,
   CheckCircle2,
+  ClipboardCheck,
+  ClipboardCopy,
   Clock3,
   Compass,
   Flag,
   Gauge,
   Lightbulb,
   MapPin,
+  Pencil,
+  RotateCcw,
   Route,
+  Save,
   Sparkles,
+  UserPlus,
   Users,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 import {
   type BuilderProfile,
-  deadlines,
   type EventBlock,
   type EventDay,
   eventDays,
-  mentors,
-  profiles,
-  resources,
-  schedule,
-  venues,
+  deadlines as mockDeadlines,
+  mentors as mockMentors,
+  resources as mockResources,
+  schedule as mockSchedule,
+  venues as mockVenues,
+  profiles as seedProfiles,
 } from "./data";
 
 const demoTimes = ["09:00", "10:30", "14:00", "18:30", "21:30"];
+const customProfilesKey = "aabw-next-move-custom-profiles";
+const completedItemsKey = "aabw-next-move-completed-items";
+const selectedStateKey = "aabw-next-move-selected-state";
+
+type DraftProfile = Omit<BuilderProfile, "goals" | "stack" | "skillGaps"> & {
+  goals: string;
+  stack: string;
+  skillGaps: string;
+};
+
+type SavedState = {
+  profileId: string;
+  selectedDay: EventDay;
+  selectedTime: string;
+};
+
+type EventDataPayload = {
+  source: "supabase" | "mock";
+  reason?: string;
+  venues: typeof mockVenues;
+  schedule: typeof mockSchedule;
+  resources: typeof mockResources;
+  mentors: typeof mockMentors;
+  deadlines: typeof mockDeadlines;
+  profiles: BuilderProfile[];
+};
+
+type AiInsight = {
+  source: "openai" | "deterministic";
+  explanation: string;
+  now: string;
+  next: string;
+  beforeDemo: string;
+  risk: string;
+  reason?: string;
+};
 
 function toMinutes(time: string) {
   const [hours, minutes] = time.split(":").map(Number);
@@ -49,8 +97,29 @@ function overlapScore(a: string[], b: string[]) {
   return a.reduce((score, item) => score + (bSet.has(item) ? 1 : 0), 0);
 }
 
-function venueName(id: string) {
-  return venues.find((venue) => venue.id === id)?.name ?? id;
+function venueName(id: string, venueList: typeof mockVenues) {
+  return venueList.find((venue) => venue.id === id)?.name ?? id;
+}
+
+function uniqueProfiles(profileList: BuilderProfile[]) {
+  const seen = new Set<string>();
+  return profileList.filter((profile) => {
+    if (seen.has(profile.id)) return false;
+    seen.add(profile.id);
+    return true;
+  });
+}
+
+function defaultEventData(): EventDataPayload {
+  return {
+    source: "mock",
+    venues: mockVenues,
+    schedule: mockSchedule,
+    resources: mockResources,
+    mentors: mockMentors,
+    deadlines: mockDeadlines,
+    profiles: seedProfiles,
+  };
 }
 
 function scoreBlock(block: EventBlock, profile: BuilderProfile, selectedTime: string) {
@@ -82,19 +151,24 @@ function explainMove(block: EventBlock, profile: BuilderProfile) {
     : "Recommended because it is the strongest upcoming event for your current day and venue.";
 }
 
-function getUpcomingBlocks(day: EventDay, selectedTime: string) {
+function getUpcomingBlocks(scheduleList: typeof mockSchedule, day: EventDay, selectedTime: string) {
   const now = toMinutes(selectedTime);
-  return schedule
+  return scheduleList
     .filter((block) => block.day === day && toMinutes(block.endTime) >= now - 15)
     .sort((a, b) => toMinutes(a.time) - toMinutes(b.time));
 }
 
-function recommendation(profile: BuilderProfile, day: EventDay, selectedTime: string) {
-  const upcoming = getUpcomingBlocks(day, selectedTime);
+function recommendation(
+  scheduleList: typeof mockSchedule,
+  profile: BuilderProfile,
+  day: EventDay,
+  selectedTime: string,
+) {
+  const upcoming = getUpcomingBlocks(scheduleList, day, selectedTime);
   const ranked = upcoming
     .map((block) => ({ block, score: scoreBlock(block, profile, selectedTime) }))
     .sort((a, b) => b.score - a.score);
-  const best = ranked[0]?.block ?? schedule.find((block) => block.day === day) ?? schedule[0];
+  const best = ranked[0]?.block ?? scheduleList.find((block) => block.day === day) ?? scheduleList[0];
   const next = upcoming.find((block) => block.id !== best.id);
 
   return {
@@ -105,9 +179,24 @@ function recommendation(profile: BuilderProfile, day: EventDay, selectedTime: st
   };
 }
 
-function relevantResources(profile: BuilderProfile) {
+function rankedDayBlocks(
+  scheduleList: typeof mockSchedule,
+  profile: BuilderProfile,
+  day: EventDay,
+  selectedTime: string,
+) {
+  return scheduleList
+    .filter((block) => block.day === day)
+    .map((block) => ({
+      block,
+      score: Math.min(96, Math.max(40, scoreBlock(block, profile, selectedTime))),
+    }))
+    .sort((a, b) => b.score - a.score || toMinutes(a.block.time) - toMinutes(b.block.time));
+}
+
+function relevantResources(resourceList: typeof mockResources, profile: BuilderProfile) {
   const signals = [...profile.goals, ...profile.stack, ...profile.skillGaps, profile.priority];
-  return resources
+  return resourceList
     .map((resource) => ({
       resource,
       score: overlapScore(resource.tags, signals),
@@ -116,32 +205,319 @@ function relevantResources(profile: BuilderProfile) {
     .slice(0, 3);
 }
 
-function relevantMentors(profile: BuilderProfile) {
+function relevantMentors(mentorList: typeof mockMentors, profile: BuilderProfile) {
   const signals = [...profile.goals, ...profile.stack, ...profile.skillGaps, profile.priority];
-  return mentors
+  return mentorList
     .map((mentor) => ({ mentor, score: overlapScore(mentor.tags, signals) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
 }
 
-function activeDeadlines(day: EventDay) {
-  return deadlines.filter((deadline) => deadline.day >= day).slice(0, 3);
+function activeDeadlines(deadlineList: typeof mockDeadlines, day: EventDay) {
+  return deadlineList.filter((deadline) => deadline.day >= day).slice(0, 3);
+}
+
+function splitSignals(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function toDraftProfile(profile: BuilderProfile): DraftProfile {
+  return {
+    ...profile,
+    goals: profile.goals.join(", "),
+    stack: profile.stack.join(", "),
+    skillGaps: profile.skillGaps.join(", "),
+  };
+}
+
+function fromDraftProfile(draft: DraftProfile): BuilderProfile {
+  return {
+    ...draft,
+    name: draft.name.trim() || "Untitled builder",
+    project: draft.project.trim() || "Builder Experience project",
+    track: "Builder Experience",
+    goals: splitSignals(draft.goals),
+    stack: splitSignals(draft.stack),
+    skillGaps: splitSignals(draft.skillGaps),
+  };
+}
+
+function readJson<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function actionPlanText({
+  profile,
+  dayMeta,
+  selectedTime,
+  best,
+  next,
+  explanation,
+  deadlineTitle,
+  venueList,
+}: {
+  profile: BuilderProfile;
+  dayMeta: (typeof eventDays)[number];
+  selectedTime: string;
+  best: EventBlock;
+  next?: EventBlock;
+  explanation: string;
+  deadlineTitle?: string;
+  venueList: typeof mockVenues;
+}) {
+  return [
+    `AABW Next Move for ${profile.name}`,
+    `${dayMeta.label} - ${dayMeta.theme} at ${selectedTime}`,
+    "",
+    `NOW: ${best.title}`,
+    `Time: ${best.time}-${best.endTime}`,
+    `Venue: ${venueName(best.venueId, venueList)}`,
+    `Why: ${explanation}`,
+    "",
+    next ? `NEXT: ${next.title} (${next.time}-${next.endTime})` : "NEXT: Capture notes and update the README.",
+    deadlineTitle ? `BEFORE DEMO: ${deadlineTitle}` : "BEFORE DEMO: Keep a fallback demo video and seeded data ready.",
+  ].join("\n");
 }
 
 export function NextMoveDashboard() {
-  const [profileId, setProfileId] = useState(profiles[0].id);
+  const [eventData, setEventData] = useState<EventDataPayload>(() => defaultEventData());
+  const [aiInsight, setAiInsight] = useState<AiInsight | null>(null);
+  const [customProfiles, setCustomProfiles] = useState<BuilderProfile[]>([]);
+  const [profileId, setProfileId] = useState(seedProfiles[0].id);
   const [selectedDay, setSelectedDay] = useState<EventDay>(2);
   const [selectedTime, setSelectedTime] = useState("10:30");
+  const [completedItems, setCompletedItems] = useState<string[]>([]);
+  const [isHydrated, setIsHydrated] = useState(false);
 
-  const profile = profiles.find((item) => item.id === profileId) ?? profiles[0];
+  const allProfiles = useMemo(
+    () => uniqueProfiles([...eventData.profiles, ...customProfiles]),
+    [customProfiles, eventData.profiles],
+  );
+  const profile = allProfiles.find((item) => item.id === profileId) ?? allProfiles[0];
+  const [draftProfile, setDraftProfile] = useState<DraftProfile>(() => toDraftProfile(profile));
   const dayMeta = eventDays.find((item) => item.day === selectedDay) ?? eventDays[0];
-  const currentVenue = venues.find((venue) => venue.id === profile.currentVenue) ?? venues[0];
+  const currentVenue = eventData.venues.find((venue) => venue.id === profile.currentVenue) ?? eventData.venues[0];
 
-  const rec = useMemo(() => recommendation(profile, selectedDay, selectedTime), [profile, selectedDay, selectedTime]);
-  const upcoming = useMemo(() => getUpcomingBlocks(selectedDay, selectedTime), [selectedDay, selectedTime]);
-  const resourceMatches = useMemo(() => relevantResources(profile), [profile]);
-  const mentorMatches = useMemo(() => relevantMentors(profile), [profile]);
-  const deadlineQueue = useMemo(() => activeDeadlines(selectedDay), [selectedDay]);
+  const rec = useMemo(
+    () => recommendation(eventData.schedule, profile, selectedDay, selectedTime),
+    [eventData.schedule, profile, selectedDay, selectedTime],
+  );
+  const resourceMatches = useMemo(
+    () => relevantResources(eventData.resources, profile),
+    [eventData.resources, profile],
+  );
+  const mentorMatches = useMemo(() => relevantMentors(eventData.mentors, profile), [eventData.mentors, profile]);
+  const deadlineQueue = useMemo(
+    () => activeDeadlines(eventData.deadlines, selectedDay),
+    [eventData.deadlines, selectedDay],
+  );
+  const rankedBlocks = useMemo(
+    () => rankedDayBlocks(eventData.schedule, profile, selectedDay, selectedTime),
+    [eventData.schedule, profile, selectedDay, selectedTime],
+  );
+  const actionItems = useMemo(
+    () => [
+      `move:${rec.best.id}`,
+      rec.next ? `next:${rec.next.id}` : "next:notes",
+      "before-demo",
+      ...deadlineQueue.map((deadline) => `deadline:${deadline.id}`),
+    ],
+    [deadlineQueue, rec.best.id, rec.next],
+  );
+  const readiness = Math.round(
+    (actionItems.filter((item) => completedItems.includes(item)).length / Math.max(1, actionItems.length)) * 100,
+  );
+
+  useEffect(() => {
+    const storedProfiles = readJson<BuilderProfile[]>(customProfilesKey, []);
+    const storedCompleted = readJson<string[]>(completedItemsKey, []);
+    const storedState = readJson<SavedState>(selectedStateKey, {
+      profileId: seedProfiles[0].id,
+      selectedDay: 2,
+      selectedTime: "10:30",
+    });
+
+    setCustomProfiles(storedProfiles);
+    setCompletedItems(storedCompleted);
+    setProfileId(storedState.profileId);
+    setSelectedDay(storedState.selectedDay);
+    setSelectedTime(storedState.selectedTime);
+    setIsHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    let isActive = true;
+
+    fetch("/api/event-data")
+      .then((response) => response.json() as Promise<EventDataPayload>)
+      .then((payload) => {
+        if (!isActive) return;
+        setEventData(payload);
+        if (payload.source === "supabase") {
+          toast.success("Loaded event data from Supabase");
+        }
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setEventData(defaultEventData());
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isActive = true;
+    setAiInsight(null);
+
+    fetch("/api/ai/next-move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile,
+        day: `${dayMeta.label} - ${dayMeta.theme}`,
+        selectedTime,
+        best: {
+          title: rec.best.title,
+          time: rec.best.time,
+          endTime: rec.best.endTime,
+          venue: venueName(rec.best.venueId, eventData.venues),
+          outcome: rec.best.outcome,
+          tags: rec.best.tags,
+        },
+        next: rec.next
+          ? {
+              title: rec.next.title,
+              time: rec.next.time,
+              endTime: rec.next.endTime,
+              venue: venueName(rec.next.venueId, eventData.venues),
+            }
+          : undefined,
+        deadlineTitle: deadlineQueue[0]?.title,
+        deterministicExplanation: rec.explanation,
+      }),
+    })
+      .then((response) => response.json() as Promise<AiInsight>)
+      .then((payload) => {
+        if (!isActive) return;
+        setAiInsight(payload);
+      })
+      .catch(() => {
+        if (!isActive) return;
+        setAiInsight({
+          source: "deterministic",
+          explanation: rec.explanation,
+          now: "Use the ranked recommendation and venue context.",
+          next: rec.next ? `Afterward, consider ${rec.next.title}.` : "Capture notes and update your README.",
+          beforeDemo: deadlineQueue[0]?.title ?? "Keep a fallback demo video and seeded data ready.",
+          risk: "AI route unavailable.",
+        });
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [dayMeta.label, dayMeta.theme, deadlineQueue, eventData.venues, profile, rec, selectedTime]);
+
+  useEffect(() => {
+    setDraftProfile(toDraftProfile(profile));
+  }, [profile]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    window.localStorage.setItem(customProfilesKey, JSON.stringify(customProfiles));
+  }, [customProfiles, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    window.localStorage.setItem(completedItemsKey, JSON.stringify(completedItems));
+  }, [completedItems, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    window.localStorage.setItem(selectedStateKey, JSON.stringify({ profileId, selectedDay, selectedTime }));
+  }, [isHydrated, profileId, selectedDay, selectedTime]);
+
+  const toggleCompleted = (id: string) => {
+    setCompletedItems((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  };
+
+  const saveDraftProfile = async () => {
+    const nextProfile = fromDraftProfile(draftProfile);
+    const isCustomProfile = nextProfile.id.startsWith("custom-");
+    const id = isCustomProfile ? nextProfile.id : `custom-${Date.now()}`;
+    const savedProfile = {
+      ...nextProfile,
+      id,
+      name: nextProfile.name,
+    };
+
+    setCustomProfiles((current) => {
+      const exists = current.some((item) => item.id === id);
+      return exists ? current.map((item) => (item.id === id ? savedProfile : item)) : [...current, savedProfile];
+    });
+    setProfileId(id);
+
+    try {
+      const response = await fetch("/api/profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(savedProfile),
+      });
+      const payload = (await response.json()) as { persisted: boolean; profile?: BuilderProfile; reason?: string };
+      if (payload.persisted && payload.profile) {
+        const persistedProfile = payload.profile;
+        setCustomProfiles((current) => current.map((item) => (item.id === id ? persistedProfile : item)));
+        toast.success("Builder profile saved to Supabase");
+      } else {
+        toast.info(payload.reason ? `Saved locally: ${payload.reason}` : "Saved locally");
+      }
+    } catch {
+      toast.info("Saved locally. Supabase profile sync is unavailable.");
+    }
+  };
+
+  const resetWorkspace = () => {
+    setCustomProfiles([]);
+    setCompletedItems([]);
+    setProfileId(seedProfiles[0].id);
+    setSelectedDay(2);
+    setSelectedTime("10:30");
+    window.localStorage.removeItem(customProfilesKey);
+    window.localStorage.removeItem(completedItemsKey);
+    window.localStorage.removeItem(selectedStateKey);
+    toast.success("Demo workspace reset");
+  };
+
+  const copyPlan = async () => {
+    const text = actionPlanText({
+      profile,
+      dayMeta,
+      selectedTime,
+      best: rec.best,
+      next: rec.next,
+      explanation: aiInsight?.explanation ?? rec.explanation,
+      deadlineTitle: deadlineQueue[0]?.title,
+      venueList: eventData.venues,
+    });
+
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Action plan copied");
+    } catch {
+      toast.error("Could not copy action plan");
+    }
+  };
 
   return (
     <div className="@container/main flex flex-col gap-4 md:gap-6">
@@ -158,7 +534,10 @@ export function NextMoveDashboard() {
               Live event copilot for deciding where to go, who to meet, and what to do next.
             </CardDescription>
             <CardAction>
-              <Badge variant="secondary">MVP demo</Badge>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Badge variant="secondary">{eventData.source === "supabase" ? "Supabase live" : "Mock fallback"}</Badge>
+                <Badge variant="outline">{aiInsight?.source === "openai" ? "OpenAI on" : "AI fallback"}</Badge>
+              </div>
             </CardAction>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-3">
@@ -168,7 +547,7 @@ export function NextMoveDashboard() {
                 Builder profile
               </div>
               <div className="flex flex-wrap gap-2">
-                {profiles.map((item) => (
+                {allProfiles.map((item) => (
                   <Button
                     key={item.id}
                     type="button"
@@ -245,13 +624,18 @@ export function NextMoveDashboard() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 *:data-[slot=card]:bg-linear-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs xl:grid-cols-4 dark:*:data-[slot=card]:bg-card">
-        <MetricCard icon={Gauge} label="Match confidence" value={`${rec.score}%`} detail={rec.explanation} />
+        <MetricCard
+          icon={Gauge}
+          label="Match confidence"
+          value={`${rec.score}%`}
+          detail={aiInsight?.explanation ?? rec.explanation}
+        />
         <MetricCard icon={MapPin} label="Current venue" value={currentVenue.area} detail={currentVenue.travelNote} />
         <MetricCard
-          icon={Flag}
-          label="Open deadlines"
-          value={String(deadlineQueue.length)}
-          detail={deadlineQueue[0]?.title ?? "No upcoming event deadlines"}
+          icon={ClipboardCheck}
+          label="Run readiness"
+          value={`${readiness}%`}
+          detail={`${actionItems.filter((item) => completedItems.includes(item)).length}/${actionItems.length} actions done`}
         />
         <MetricCard
           icon={Sparkles}
@@ -273,8 +657,12 @@ export function NextMoveDashboard() {
             <CardDescription>
               {dayMeta.label} - {dayMeta.theme} - {dayMeta.date} at {selectedTime}
             </CardDescription>
-            <CardAction>
+            <CardAction className="flex items-center gap-2">
               <Badge>{rec.best.type}</Badge>
+              <Button size="sm" variant="outline" type="button" onClick={copyPlan}>
+                <ClipboardCopy className="size-3.5" />
+                Copy plan
+              </Button>
             </CardAction>
           </CardHeader>
           <CardContent className="flex flex-col gap-5">
@@ -282,7 +670,7 @@ export function NextMoveDashboard() {
               <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                 <div>
                   <div className="text-muted-foreground text-sm">
-                    {rec.best.time}-{rec.best.endTime} at {venueName(rec.best.venueId)}
+                    {rec.best.time}-{rec.best.endTime} at {venueName(rec.best.venueId, eventData.venues)}
                   </div>
                   <h2 className="mt-1 font-heading font-medium text-2xl tracking-tight">{rec.best.title}</h2>
                   <p className="mt-2 max-w-2xl text-muted-foreground text-sm">{rec.best.outcome}</p>
@@ -305,58 +693,72 @@ export function NextMoveDashboard() {
 
             <div className="grid gap-3 md:grid-cols-3">
               <ActionStep
+                id={`move:${rec.best.id}`}
+                checked={completedItems.includes(`move:${rec.best.id}`)}
                 title="Now"
                 icon={Route}
+                onCheckedChange={toggleCompleted}
                 detail={
-                  rec.best.venueId === profile.currentVenue
+                  aiInsight?.now ??
+                  (rec.best.venueId === profile.currentVenue
                     ? "Stay on site and join the room before it fills."
-                    : `Leave for ${venueName(rec.best.venueId)} and budget travel time.`
+                    : `Leave for ${venueName(rec.best.venueId, eventData.venues)} and budget travel time.`)
                 }
               />
               <ActionStep
+                id={rec.next ? `next:${rec.next.id}` : "next:notes"}
+                checked={completedItems.includes(rec.next ? `next:${rec.next.id}` : "next:notes")}
                 title="Next"
                 icon={Lightbulb}
-                detail={rec.next ? `Afterward, consider ${rec.next.title}.` : "Capture notes and update your README."}
+                onCheckedChange={toggleCompleted}
+                detail={
+                  aiInsight?.next ??
+                  (rec.next ? `Afterward, consider ${rec.next.title}.` : "Capture notes and update your README.")
+                }
               />
               <ActionStep
+                id="before-demo"
+                checked={completedItems.includes("before-demo")}
                 title="Before demo"
                 icon={BadgeCheck}
-                detail={deadlineQueue[0]?.detail ?? "Keep a fallback demo video and seeded data ready."}
+                onCheckedChange={toggleCompleted}
+                detail={
+                  aiInsight?.beforeDemo ??
+                  deadlineQueue[0]?.detail ??
+                  "Keep a fallback demo video and seeded data ready."
+                }
               />
             </div>
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Why this helps builders</CardTitle>
-            <CardDescription>Workflow output, not a plain chat response.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {[
-              "Cuts schedule confusion across multiple venues and days.",
-              "Turns project context into concrete next actions.",
-              "Surfaces deadlines, mentors, and perks at the right moment.",
-              "Can run on public or mock data, then integrate with live AABW data.",
-            ].map((item) => (
-              <div key={item} className="flex gap-3 rounded-lg border bg-muted/30 p-3 text-sm">
-                <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
-                <span>{item}</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
+        <ProfileBuilder
+          draft={draftProfile}
+          customProfileCount={customProfiles.length}
+          onDraftChange={setDraftProfile}
+          onSave={saveDraftProfile}
+          onReset={resetWorkspace}
+          venues={eventData.venues}
+          starterProfile={seedProfiles[0]}
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr_1fr]">
         <Card>
           <CardHeader>
-            <CardTitle>Live schedule navigator</CardTitle>
-            <CardDescription>Ranked for the selected day and time.</CardDescription>
+            <CardTitle>Daily runbook</CardTitle>
+            <CardDescription>Top moves ranked by context, timing, venue, and urgency.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            {upcoming.map((block) => (
-              <ScheduleRow key={block.id} block={block} selected={block.id === rec.best.id} />
+            {rankedBlocks.map(({ block, score }, index) => (
+              <ScheduleRow
+                key={block.id}
+                block={block}
+                score={score}
+                rank={index + 1}
+                selected={block.id === rec.best.id}
+                venues={eventData.venues}
+              />
             ))}
           </CardContent>
         </Card>
@@ -402,31 +804,65 @@ export function NextMoveDashboard() {
                     </div>
                     <Badge variant="secondary">{mentor.slot}</Badge>
                   </div>
-                  <div className="mt-2 text-muted-foreground text-xs">{venueName(mentor.venueId)}</div>
-                </div>
-              ))}
-            </div>
-            <div className="space-y-2">
-              {deadlineQueue.map((deadline) => (
-                <div key={deadline.id} className="flex gap-3 rounded-lg border bg-muted/30 p-3">
-                  <Flag
-                    className={cn(
-                      "mt-0.5 size-4 shrink-0",
-                      deadline.severity === "critical" ? "text-destructive" : "text-primary",
-                    )}
-                  />
-                  <div>
-                    <div className="font-medium text-sm">
-                      Day {deadline.day}, {deadline.time}: {deadline.title}
-                    </div>
-                    <div className="text-muted-foreground text-xs">{deadline.detail}</div>
+                  <div className="mt-2 text-muted-foreground text-xs">
+                    {venueName(mentor.venueId, eventData.venues)}
                   </div>
                 </div>
               ))}
             </div>
+            <div className="space-y-2">
+              {deadlineQueue.map((deadline) => {
+                const id = `deadline:${deadline.id}`;
+                const isChecked = completedItems.includes(id);
+                return (
+                  <div
+                    key={deadline.id}
+                    className="flex gap-3 rounded-lg border bg-muted/30 p-3 transition-colors hover:bg-muted/50"
+                  >
+                    <Checkbox
+                      aria-label={`Mark ${deadline.title} complete`}
+                      checked={isChecked}
+                      onCheckedChange={() => toggleCompleted(id)}
+                    />
+                    <Flag
+                      className={cn(
+                        "mt-0.5 size-4 shrink-0",
+                        deadline.severity === "critical" ? "text-destructive" : "text-primary",
+                      )}
+                    />
+                    <span className="min-w-0">
+                      <span className={cn("block font-medium text-sm", isChecked && "line-through opacity-60")}>
+                        Day {deadline.day}, {deadline.time}: {deadline.title}
+                      </span>
+                      <span className="block text-muted-foreground text-xs">{deadline.detail}</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Why this helps builders</CardTitle>
+          <CardDescription>Workflow output, not a plain chat response.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {[
+            "Cuts schedule confusion across multiple venues and days.",
+            "Turns project context into concrete next actions.",
+            "Persists profile and checklist state for real event use.",
+            "Can run on public or mock data, then integrate with live AABW data.",
+          ].map((item) => (
+            <div key={item} className="flex gap-3 rounded-lg border bg-muted/30 p-3 text-sm">
+              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+              <span>{item}</span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -475,19 +911,50 @@ function MetricCard({
   );
 }
 
-function ActionStep({ title, detail, icon: Icon }: { title: string; detail: string; icon: typeof Route }) {
+function ActionStep({
+  id,
+  checked,
+  title,
+  detail,
+  icon: Icon,
+  onCheckedChange,
+}: {
+  id: string;
+  checked: boolean;
+  title: string;
+  detail: string;
+  icon: typeof Route;
+  onCheckedChange: (id: string) => void;
+}) {
   return (
-    <div className="rounded-lg border bg-background/60 p-3">
-      <div className="mb-2 flex items-center gap-2 font-medium text-sm">
-        <Icon className="size-4 text-primary" />
-        {title}
-      </div>
-      <p className="text-muted-foreground text-sm">{detail}</p>
+    <div className="flex gap-3 rounded-lg border bg-background/60 p-3 transition-colors hover:bg-muted/40">
+      <Checkbox aria-label={`Mark ${title} complete`} checked={checked} onCheckedChange={() => onCheckedChange(id)} />
+      <span className="min-w-0">
+        <span className="mb-2 flex items-center gap-2 font-medium text-sm">
+          <Icon className="size-4 text-primary" />
+          {title}
+        </span>
+        <span className={cn("block text-muted-foreground text-sm", checked && "line-through opacity-60")}>
+          {detail}
+        </span>
+      </span>
     </div>
   );
 }
 
-function ScheduleRow({ block, selected }: { block: EventBlock; selected: boolean }) {
+function ScheduleRow({
+  block,
+  selected,
+  rank,
+  score,
+  venues,
+}: {
+  block: EventBlock;
+  selected: boolean;
+  rank: number;
+  score: number;
+  venues: typeof mockVenues;
+}) {
   return (
     <div
       className={cn(
@@ -498,13 +965,163 @@ function ScheduleRow({ block, selected }: { block: EventBlock; selected: boolean
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-muted-foreground text-xs">
-            {block.time}-{block.endTime} - {venueName(block.venueId)}
+            #{rank} - {block.time}-{block.endTime} - {venueName(block.venueId, venues)}
           </div>
           <div className="mt-1 font-medium">{block.title}</div>
         </div>
-        <Badge variant={selected ? "default" : "outline"}>{selected ? "next" : block.type}</Badge>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <Badge variant={selected ? "default" : "outline"}>{selected ? "next" : block.type}</Badge>
+          <span className="text-muted-foreground text-xs">{score}%</span>
+        </div>
       </div>
       <p className="mt-2 text-muted-foreground text-sm">{block.outcome}</p>
+    </div>
+  );
+}
+
+function ProfileBuilder({
+  draft,
+  customProfileCount,
+  venues,
+  starterProfile,
+  onDraftChange,
+  onSave,
+  onReset,
+}: {
+  draft: DraftProfile;
+  customProfileCount: number;
+  venues: typeof mockVenues;
+  starterProfile: BuilderProfile;
+  onDraftChange: (profile: DraftProfile) => void;
+  onSave: () => Promise<void>;
+  onReset: () => void;
+}) {
+  const updateDraft = (updates: Partial<DraftProfile>) => onDraftChange({ ...draft, ...updates });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Pencil className="size-4 text-primary" />
+          Builder profile builder
+        </CardTitle>
+        <CardDescription>Create a team context and keep it for the next visit.</CardDescription>
+        <CardAction>
+          <Badge variant="outline">{customProfileCount} saved</Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="builder-name">Team or builder name</Label>
+            <Input
+              id="builder-name"
+              value={draft.name}
+              onChange={(event) => updateDraft({ name: event.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Priority</Label>
+            <Select
+              value={draft.priority}
+              onValueChange={(value) => updateDraft({ priority: value as BuilderProfile["priority"] })}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="learn">Learn</SelectItem>
+                <SelectItem value="debug">Debug</SelectItem>
+                <SelectItem value="find-team">Find team</SelectItem>
+                <SelectItem value="prepare-demo">Prepare demo</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="project">Project</Label>
+          <Textarea
+            id="project"
+            value={draft.project}
+            onChange={(event) => updateDraft({ project: event.target.value })}
+          />
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label>Current venue</Label>
+            <Select value={draft.currentVenue} onValueChange={(value) => updateDraft({ currentVenue: value })}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {venues.map((venue) => (
+                  <SelectItem key={venue.id} value={venue.id}>
+                    {venue.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <SignalField
+            id="goals"
+            label="Goals"
+            value={draft.goals}
+            onChange={(value) => updateDraft({ goals: value })}
+          />
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <SignalField
+            id="stack"
+            label="Stack"
+            value={draft.stack}
+            onChange={(value) => updateDraft({ stack: value })}
+          />
+          <SignalField
+            id="skill-gaps"
+            label="Skill gaps"
+            value={draft.skillGaps}
+            onChange={(value) => updateDraft({ skillGaps: value })}
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" onClick={onSave}>
+            <Save className="size-3.5" />
+            Save profile
+          </Button>
+          <Button type="button" variant="outline" onClick={() => onDraftChange(toDraftProfile(starterProfile))}>
+            <UserPlus className="size-3.5" />
+            Starter profile
+          </Button>
+          <Button type="button" variant="destructive" onClick={onReset}>
+            <RotateCcw className="size-3.5" />
+            Reset demo
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SignalField({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>{label}</Label>
+      <Input id={id} value={value} onChange={(event) => onChange(event.target.value)} />
+      <p className="text-muted-foreground text-xs">Comma-separated signals.</p>
     </div>
   );
 }

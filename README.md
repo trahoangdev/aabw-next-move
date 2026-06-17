@@ -19,12 +19,15 @@ AABW Next Move is designed for that live-event pain point. It is not a generic c
 The MVP lets you simulate different builder situations:
 
 - Select a builder or team profile.
+- Create or edit a custom builder profile.
 - Select the current AABW day.
 - Select the current time.
 - Get a ranked "Next Move" recommendation.
 - See why the recommendation was made.
 - Review the next action, follow-up action, and pre-demo checklist.
 - Discover matching resources, perks, mentors, and deadlines.
+- Mark actions and deadlines complete.
+- Copy a plain-text action plan for Discord, WhatsApp, or team notes.
 
 Example recommendation:
 
@@ -33,10 +36,14 @@ Example recommendation:
 ## Features
 
 - Builder profile selector with project goals, stack, skill gaps, current venue, and priority.
+- Custom profile builder with local persistence.
 - Real-time-style schedule navigator for AABW Day 1-5.
 - Recommendation engine for workshops, mentor sessions, hackathon blocks, and demo milestones.
 - Match confidence score with explanation.
 - "Now / Next / Before demo" action plan.
+- Copyable action plan.
+- Persisted checklist and run readiness score.
+- Daily runbook ranked by context, timing, venue, and urgency.
 - Venue context and travel notes.
 - Resource and perk matching.
 - Mentor matching.
@@ -52,6 +59,8 @@ Example recommendation:
 - Tailwind CSS v4
 - shadcn/ui-style component system
 - Lucide icons
+- Supabase JS + Supabase SSR
+- OpenAI Node SDK with Responses API route
 - Zustand for preferences inherited from the template shell
 - Biome for formatting and linting
 
@@ -60,6 +69,11 @@ Example recommendation:
 ```txt
 src/
   app/
+    api/
+      ai/
+        next-move/route.ts             # OpenAI Responses API with deterministic fallback
+      event-data/route.ts              # Supabase event data loader with mock fallback
+      profiles/route.ts                # Supabase builder profile upsert
     (external)/
       page.tsx                         # Redirects / to /dashboard/next-move
     (main)/
@@ -75,16 +89,24 @@ src/
     ui/                                # Reusable UI components kept from the template
   config/
     app-config.ts                      # App metadata
+  lib/
+    aabw/supabase-mappers.ts           # Supabase row <-> app model mapping
+    client.ts                          # Supabase browser client
+    server.ts                          # Supabase server client
   navigation/
     sidebar/
       sidebar-items.ts                 # Single product nav entry
+supabase/
+  schema.sql                           # Tables, RLS policies, and seed data
 ```
 
 Only the AABW Next Move product route is kept. Template demo pages were removed, while the reusable UI component library remains available under `src/components/ui`.
 
 ## Mock Data
 
-The MVP uses local mock data in:
+The app can read from Supabase or fallback to local mock data.
+
+Local mock data lives in:
 
 ```txt
 src/app/(main)/dashboard/next-move/_components/data.ts
@@ -100,7 +122,45 @@ It includes:
 - Mentors.
 - Deadlines.
 
-This keeps the project self-contained for judging and demo purposes. In a live deployment, this file can be replaced with data from Supabase, Airtable, Notion, a CMS, or an official AABW event API.
+This keeps the project self-contained for judging and demo purposes.
+
+For Supabase-backed mode:
+
+1. Open your Supabase project SQL editor.
+2. Run:
+
+```txt
+supabase/schema.sql
+```
+
+3. Restart the dev server.
+4. Open:
+
+```txt
+http://localhost:3000/api/event-data
+```
+
+When the schema is available, the API returns:
+
+```json
+{ "source": "supabase" }
+```
+
+If tables are not created yet, it returns:
+
+```json
+{ "source": "mock" }
+```
+
+The fallback is intentional so the demo keeps working before database setup.
+
+The current browser session state is stored in `localStorage`:
+
+- Custom builder profiles.
+- Selected profile, event day, and time.
+- Completed actions and deadlines.
+
+This makes the prototype feel closer to an actual event tool without requiring a backend.
 
 ## Recommendation Logic
 
@@ -124,6 +184,60 @@ Future AI upgrade path:
 3. Retrieve relevant event data for the current builder context.
 4. Use an LLM to produce concise explanations and action plans.
 5. Keep deterministic rules for safety-critical constraints such as time, venue, and deadlines.
+
+## OpenAI Setup
+
+The app includes a server route:
+
+```txt
+POST /api/ai/next-move
+```
+
+It uses the OpenAI SDK when `OPENAI_API_KEY` is configured. Until then, it returns a deterministic fallback response, so the UI still works.
+
+Add your key to `.env.local`:
+
+```bash
+OPENAI_API_KEY=your_api_key_here
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+The API route is intentionally server-side only. The browser never receives the OpenAI API key.
+
+## Supabase Setup
+
+Dependencies are installed:
+
+```bash
+npm install @supabase/supabase-js @supabase/ssr
+```
+
+Supabase shadcn helper files are installed:
+
+```txt
+src/lib/client.ts
+src/lib/server.ts
+src/lib/middleware.ts
+```
+
+Environment variables:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://nwbssvcunlmuegqivqpq.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_N9NqRpSLxY5-D8-6OWL2Kg_WECOIhUw
+```
+
+Tables included in `supabase/schema.sql`:
+
+- `venues`
+- `event_blocks`
+- `resources`
+- `mentors`
+- `deadlines`
+- `builder_profiles`
+- `builder_checklist_items`
+
+The current RLS policies are public-readable for event data and public insert/update for builder profiles/checklist items, which fits an unauthenticated event MVP. Tighten these policies when adding real auth.
 
 ## Getting Started
 
@@ -191,9 +305,9 @@ AABW Next Move directly targets the Builder Experience Award brief:
 ## What Is Not Included Yet
 
 - Real authentication.
-- Database persistence.
-- Live AABW API integration.
-- LLM API calls.
+- Supabase schema must be run before database persistence is active.
+- Live official AABW API integration.
+- OpenAI calls require `OPENAI_API_KEY`.
 - Push notifications.
 - Real map routing.
 
